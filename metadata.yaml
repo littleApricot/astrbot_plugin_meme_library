@@ -1,0 +1,7 @@
+name: astrbot_plugin_meme_library
+display_name: 群聊表情图库
+desc: 自动收集群聊图片，维护统一说明，支持语义搜索、看图选择和用法纠正。
+version: v0.1.0
+author: littleApricot
+repo: https://github.com/littleApricot/astrbot_plugin_meme_library
+astrbot_version: ">=4.29.1,<4.30.0"

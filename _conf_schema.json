@@ -1,0 +1,8 @@
+{
+  "enabled": {"type": "bool", "description": "启用表情图库", "default": true},
+  "recognition_provider_id": {"type": "string", "description": "收图与语义搜索模型", "default": "", "hint": "留空使用来源会话的当前回复模型，收图模型需要支持图片输入。发送前预览仍由当前回复模型完成。", "_special": "select_provider"},
+  "model_timeout": {"type": "int", "description": "识别和搜索超时秒数", "default": 45},
+  "max_image_mb": {"type": "int", "description": "单张图片大小上限（MB）", "default": 15},
+  "search_results": {"type": "int", "description": "每次搜索返回的候选数量", "default": 5},
+  "search_batch_chars": {"type": "int", "description": "语义搜索每批说明字符预算", "default": 24000, "hint": "搜索会分批读取全部可用说明并由模型按含义选图。图库增大后模型调用量也会增加。"}
+}
