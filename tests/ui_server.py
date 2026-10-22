@@ -38,6 +38,7 @@ record, _ = plugin.library.add(buffer.getvalue(), ".png", "test-group", "", "")
 plugin.library.set_status(record["id"], "processing")
 plugin.library.recognize(
     record["id"],
+    "淡紫色图片",
     "测试图片：淡紫色背景。\n含义：用于测试说明编辑，不是真实群聊图片。",
     True,
 )

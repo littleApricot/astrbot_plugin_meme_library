@@ -1,15 +1,42 @@
-"""Persist one editable document per image and a shared collection queue."""
+"""Persist short image metadata and a shared collection queue."""
 
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 import time
 from pathlib import Path
 
+NAME_LIMIT = 24
+DESCRIPTION_LIMIT = 120
+
+
+def validate_metadata(name: str, description: str) -> tuple[str, str]:
+    """Validate concise editable metadata without silently discarding corrections.
+
+    Args:
+        name: Short image name, at most 24 characters.
+        description: Practical description, at most 120 characters.
+
+    Returns:
+        Trimmed name and single-line description.
+
+    Raises:
+        ValueError: Either field is missing, invalid or too long.
+    """
+    if not isinstance(name, str) or not isinstance(description, str):
+        raise ValueError("invalid_metadata")
+    name, description = " ".join(name.split()), " ".join(description.split())
+    if not name or not description:
+        raise ValueError("name_and_description_required")
+    if len(name) > NAME_LIMIT or len(description) > DESCRIPTION_LIMIT:
+        raise ValueError("name_max_24_description_max_120")
+    return name, description
+
 
 class Library:
-    """Own the shared image catalog, document revisions and notification cursors."""
+    """Own image names, descriptions, revisions and notification cursors."""
 
     def __init__(self, root: Path):
         self.root = root
@@ -21,14 +48,18 @@ class Library:
             CREATE TABLE IF NOT EXISTS memes (
                 id TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL,
                 filename TEXT NOT NULL, status TEXT NOT NULL,
-                document TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+                document TEXT NOT NULL DEFAULT '',
+                revision INTEGER NOT NULL DEFAULT 0,
                 origin TEXT NOT NULL, provider_id TEXT NOT NULL, source_text TEXT NOT NULL,
                 error TEXT NOT NULL DEFAULT '', added_seq INTEGER NOT NULL DEFAULT 0,
                 source_ref TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL, updated_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS revisions (
-                meme_id TEXT NOT NULL, revision INTEGER NOT NULL, document TEXT NOT NULL,
+                meme_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+                document TEXT NOT NULL DEFAULT '',
                 reason TEXT NOT NULL, actor TEXT NOT NULL, created_at REAL NOT NULL,
                 PRIMARY KEY (meme_id, revision)
             );
@@ -40,6 +71,30 @@ class Library:
             self.db.execute(
                 "ALTER TABLE memes ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''"
             )
+        # Preserve original legacy text in its existing column and revisions.
+        for table in ("memes", "revisions"):
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            for field in ("name", "description"):
+                if field not in columns:
+                    self.db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {field} TEXT NOT NULL DEFAULT ''"
+                    )
+            if "document" in columns:
+                for row in self.db.execute(
+                    f"SELECT rowid,document FROM {table} WHERE name='' AND description='' AND document<>''"
+                ).fetchall():
+                    description = " ".join(row["document"].split())
+                    name = re.split(r"[。！？；，:：]", description, maxsplit=1)[
+                        0
+                    ].strip("#* -")[:NAME_LIMIT]
+                    self.db.execute(
+                        f"UPDATE {table} SET name=?,description=? WHERE rowid=?",
+                        (
+                            name or "未命名表情",
+                            description[:DESCRIPTION_LIMIT],
+                            row["rowid"],
+                        ),
+                    )
         self.db.commit()
 
     def add(
@@ -133,14 +188,33 @@ class Library:
     def path(self, record: dict) -> Path:
         return self.root / "images" / record["filename"]
 
+    def metadata(self, record: dict) -> dict:
+        """Expose the same current metadata and original-file path to every client.
+
+        Args:
+            record: Current catalog row.
+
+        Returns:
+            Stable ID, name, short description, revision and absolute local path.
+        """
+        return {
+            "id": record["id"],
+            "name": record["name"],
+            "description": record["description"],
+            "revision": record["revision"],
+            "local_path": str(self.path(record).resolve())
+            if record["filename"]
+            else "",
+        }
+
     def records(
         self, status: str = "", query: str = "", limit: int = 100, offset: int = 0
     ) -> list[dict]:
-        """Read a stable catalog page or all active documents for semantic search.
+        """Read a stable catalog page or active metadata for semantic search.
 
         Args:
             status: Optional exact processing state.
-            query: Optional literal substring of the document or identifier.
+            query: Optional literal substring of the name, description or ID.
             limit: Maximum records to return.
             offset: Number of matching records to skip.
 
@@ -150,8 +224,8 @@ class Library:
         return [
             dict(r)
             for r in self.db.execute(
-                "SELECT * FROM memes WHERE (?='' OR status=?) AND (?='' OR instr(document,?)>0 OR instr(id,?)>0) ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
-                (status, status, query, query, query, limit, offset),
+                "SELECT * FROM memes WHERE (?='' OR status=?) AND (?='' OR instr(name,?)>0 OR instr(description,?)>0 OR instr(id,?)>0) ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
+                (status, status, query, query, query, query, limit, offset),
             )
         ]
 
@@ -173,27 +247,32 @@ class Library:
                 (status, error, seq, time.time(), meme_id),
             )
 
-    def recognize(self, meme_id: str, document: str, is_meme: bool) -> None:
+    def recognize(
+        self, meme_id: str, name: str, description: str, is_meme: bool
+    ) -> None:
         """Commit first recognition only while the original job is unchanged.
 
         Args:
             meme_id: Image being recognized.
-            document: Single unified description produced by vision.
+            name: Short image name produced by vision.
+            description: Concise visual meaning and practical usage.
             is_meme: Whether the picture is usable as a meme.
         """
+        name, description = validate_metadata(name, description)
         with self.db:
             row = self.get(meme_id)
             if row["revision"] or row["status"] != "processing":
                 if row["status"] == "processing":
                     self.set_status(
-                        meme_id, "failed", "document_changed_during_recognition"
+                        meme_id, "failed", "metadata_changed_during_recognition"
                     )
                 return
             seq = self.latest_seq() + 1 if is_meme else 0
             self.db.execute(
-                "UPDATE memes SET document=?,revision=1,status=?,added_seq=?,error='',updated_at=? WHERE id=?",
+                "UPDATE memes SET name=?,description=?,revision=1,status=?,added_seq=?,error='',updated_at=? WHERE id=?",
                 (
-                    document,
+                    name,
+                    description,
                     "ready" if is_meme else "rejected",
                     seq,
                     time.time(),
@@ -201,18 +280,25 @@ class Library:
                 ),
             )
             self.db.execute(
-                "INSERT INTO revisions VALUES(?,1,?,'首次识别','vision',?)",
-                (meme_id, document, time.time()),
+                "INSERT INTO revisions(meme_id,revision,name,description,document,reason,actor,created_at) VALUES(?,1,?,?,'','首次识别','vision',?)",
+                (meme_id, name, description, time.time()),
             )
 
     def edit(
-        self, meme_id: str, document: str, revision: int, reason: str, actor: str
+        self,
+        meme_id: str,
+        name: str,
+        description: str,
+        revision: int,
+        reason: str,
+        actor: str,
     ) -> dict:
-        """Replace the same document with optimistic concurrency control.
+        """Replace the two editable fields with optimistic concurrency control.
 
         Args:
-            meme_id: Image whose document is edited.
-            document: Complete new unified document.
+            meme_id: Image whose metadata is edited.
+            name: Complete short image name.
+            description: Complete short description.
             revision: Revision the editor has actually read.
             reason: Explanation retained in the revision log.
             actor: Editing actor, such as the model or dashboard user.
@@ -223,20 +309,19 @@ class Library:
         Raises:
             ValueError: Missing content or a revision conflict.
         """
-        if not document.strip() or len(document) > 12000:
-            raise ValueError("invalid_document")
+        name, description = validate_metadata(name, description)
         with self.db:
             row = self.get(meme_id)
             if row["revision"] != revision:
                 raise ValueError("revision_conflict")
             next_revision = revision + 1
             self.db.execute(
-                "UPDATE memes SET document=?,revision=?,updated_at=? WHERE id=?",
-                (document.strip(), next_revision, time.time(), meme_id),
+                "UPDATE memes SET name=?,description=?,revision=?,updated_at=? WHERE id=?",
+                (name, description, next_revision, time.time(), meme_id),
             )
             self.db.execute(
-                "INSERT INTO revisions VALUES(?,?,?,?,?,?)",
-                (meme_id, next_revision, document.strip(), reason, actor, time.time()),
+                "INSERT INTO revisions(meme_id,revision,name,description,document,reason,actor,created_at) VALUES(?,?,?,?,'',?,?,?)",
+                (meme_id, next_revision, name, description, reason, actor, time.time()),
             )
         return self.get(meme_id)
 

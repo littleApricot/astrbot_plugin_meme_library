@@ -49,13 +49,24 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(data["records"]), 1)
         self.assertNotIn("origin", data["records"][0])
+        self.assertNotIn("document", data["records"][0])
+        self.assertEqual(data["records"][0]["name"], row["name"])
+        original_path = data["records"][0]["local_path"]
         status, data = await self.call_api(
-            "document", {"id": row["id"], "revision": 1, "document": "修改后的统一说明"}
+            "document",
+            {
+                "id": row["id"],
+                "revision": 1,
+                "name": "新名称",
+                "description": "修改后的短描述",
+            },
         )
         self.assertEqual(status, 200)
         self.assertEqual(data["revision"], 2)
+        self.assertEqual(data["local_path"], original_path)
         status, _ = await self.call_api(
-            "document", {"id": row["id"], "revision": 1, "document": "stale"}
+            "document",
+            {"id": row["id"], "revision": 1, "name": "旧名称", "description": "stale"},
         )
         self.assertEqual(status, 409)
         status, data = await self.call_api("revisions", query="id=" + row["id"])
@@ -71,8 +82,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(
-            self.plugin.library.get(row["id"])["document"], row["document"]
+            self.plugin.library.get(row["id"])["description"], row["description"]
         )
+        self.assertEqual(self.plugin.library.get(row["id"])["name"], row["name"])
         _, data = await self.call_api("image", query="id=" + row["id"])
         self.assertTrue(data["data_url"].startswith("data:image/jpeg;base64,"))
 
