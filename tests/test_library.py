@@ -1,6 +1,7 @@
 """Verify collection, shared documents and actual AstrBot vision tool execution."""
 
 import asyncio
+import base64
 import copy
 import io
 import json
@@ -14,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from astrbot.api import AstrBotConfig
 from astrbot.api.message_components import Image, Plain
 from astrbot.core.agent.hooks import BaseAgentRunHooks
-from astrbot.core.agent.message import dump_messages_with_checkpoints
+from astrbot.core.agent.message import TextPart, dump_messages_with_checkpoints
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
 from astrbot.core.agent.tool import FunctionTool, ToolSet
@@ -183,7 +184,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.provider = MagicMock(spec=Provider)
         self.provider.provider_config = {
             "id": "fake-vision",
-            "modalities": ["text", "image"],
+            "modalities": ["text", "image", "tool_use"],
             "max_context_tokens": 128000,
         }
         self.provider.get_model.return_value = "fake-vision"
@@ -238,6 +239,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         self.assertEqual(self.plugin.library.counts(), {"ready": 1})
         self.assertEqual(self.provider.text_chat.await_count, 1)
+        first.send.assert_not_awaited()
         await self.plugin.collect(event("group-b", Image.fromFileSystem(path)))
         self.assertEqual(self.provider.text_chat.await_count, 1)
         self.assertEqual(self.plugin.library.counts(), {"ready": 1})
@@ -326,25 +328,48 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             len(self.provider.text_chat.await_args.kwargs["image_urls"]), 4
         )
 
-    async def test_only_additions_notify_and_silence_does_not_consume_notice(self):
+    async def test_collection_does_not_change_assembled_reply_request(self):
+        original = [
+            {"role": "user", "content": "群友之前的消息"},
+            {"role": "assistant", "content": "机器人之前的文字回复"},
+        ]
+        image = "data:image/png;base64," + base64.b64encode(image_bytes()).decode()
+
+        async def assembled():
+            e = event()
+            req = ProviderRequest(
+                prompt="群友发来的新图片",
+                contexts=copy.deepcopy(original),
+                image_urls=[image],
+                system_prompt="人格和记忆",
+                extra_user_content_parts=[TextPart(text="已有群聊上下文")],
+            )
+            await self.plugin.prepare(e, req)
+            self.assertEqual(req.contexts, original)
+            self.assertEqual(req.image_urls, [image])
+            self.assertEqual(
+                req.extra_user_content_parts, [TextPart(text="已有群聊上下文")]
+            )
+            runner = ToolLoopAgentRunner()
+            await runner.reset(
+                provider=self.provider,
+                request=req,
+                run_context=ContextWrapper(context=SimpleNamespace(event=e)),
+                tool_executor=FunctionToolExecutor(),
+                agent_hooks=BaseAgentRunHooks(),
+            )
+            e.send.assert_not_awaited()
+            return dump_messages_with_checkpoints(runner.run_context.messages)
+
+        before = await assembled()
         row = self.ready()
-        e = event()
-        original = [{"role": "user", "content": "old history"}]
-        req = ProviderRequest(prompt="hi", contexts=copy.deepcopy(original))
-        await self.plugin.prepare(e, req)
-        self.assertEqual(req.contexts, original)
-        self.assertEqual(req.extra_user_content_parts[0].text, "图库有新增表情包。")
-        self.assertEqual(self.plugin.library.unseen(e.unified_msg_origin), 1)
-        await self.plugin.acknowledge(
-            e, LLMResponse(role="assistant", completion_text="hi")
-        )
+        self.assertEqual(await assembled(), before)
         self.plugin.library.edit(
             row["id"], "新名称", "更新说明", 1, "correction", "model"
         )
         self.plugin.library.set_status(row["id"], "disabled")
-        next_req = ProviderRequest(prompt="next")
-        await self.plugin.prepare(event(), next_req)
-        self.assertEqual(next_req.extra_user_content_parts, [])
+        self.assertEqual(await assembled(), before)
+        self.provider.text_chat.assert_not_awaited()
 
     async def test_failed_recognition_is_visible_and_retryable(self):
         self.provider.text_chat.side_effect = TimeoutError()
@@ -427,6 +452,16 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                     tools_call_ids=["view-1"],
                 )
             if len(seen) == 2:
+                e.send.assert_not_awaited()
+                preview = next(
+                    message
+                    for message in kwargs["contexts"]
+                    if message.get("role") == "tool"
+                    and message.get("tool_call_id") == "view-1"
+                )
+                metadata, _ = json.JSONDecoder().raw_decode(preview["content"])
+                self.assertNotIn("instruction", metadata)
+                self.assertNotIn("sent", metadata)
                 self.assertIn("data:image/jpeg;base64,", json.dumps(kwargs["contexts"]))
                 self.assertIn("local_path", json.dumps(kwargs["contexts"]))
                 self.assertIn(

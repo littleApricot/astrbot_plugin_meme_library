@@ -13,7 +13,6 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import error_response, json_response, request
-from astrbot.core.agent.message import TextPart
 from astrbot.core.message.message_event_result import MessageChain
 from mcp.types import CallToolResult, ImageContent, TextContent
 
@@ -23,7 +22,7 @@ from .vision import inspect_image, parse_json, previews
 INSTRUCTIONS = """你可以使用共享表情图库，为当前回复寻找自然、贴切的表达，也可以只回复文字。
 用 meme_search 按想表达的意思搜索；已有工具历史中的候选可以复用。
 发送前必须使用 meme_view 查看实际图片与当前名称、描述，结合画面和上下文判断。
-看完图片，在下一次工具调用中使用 meme_send 发送，不能与 meme_view 并行调用。
+若决定发送，在后续一次工具调用中使用 meme_send，不能与 meme_view 并行调用。
 meme_send 会实际发送图片和可选配文，成功后避免再重复发送同一段文字或图片。
 普通群友也可以纠正用法，由你结合图片和上下文决定是否采纳；先读取当前信息，再用 meme_edit 修改名称和简短描述。
 名称优先保留能确认的角色、形象或表情系列，再加动作或情绪，例如“QQ企鹅被拿捏”；来源不确定时用可见特征命名。
@@ -233,17 +232,6 @@ class MemeLibrary(Star):
         req.system_prompt += (
             "\n\n" + INSTRUCTIONS + "\n当前来源会话：" + event.unified_msg_origin
         )
-        if self.library.unseen(event.unified_msg_origin):
-            req.extra_user_content_parts.append(
-                TextPart(text="图库有新增表情包。").mark_as_temp()
-            )
-            event.set_extra("meme_library_notice", self.library.latest_seq())
-
-    @filter.on_llm_response()
-    async def acknowledge(self, event: AstrMessageEvent, response):
-        seq = event.get_extra("meme_library_notice")
-        if seq is not None:
-            self.library.acknowledge(event.unified_msg_origin, seq)
 
     @llm_tool(name="meme_search")
     async def search(self, event: AstrMessageEvent, query: str) -> str:
@@ -357,7 +345,6 @@ class MemeLibrary(Star):
             data = {
                 **self.library.metadata(row),
                 "status": row["status"],
-                "instruction": "先看图确认含义，在下一次模型工具调用中使用 meme_send 发送本ID。",
             }
             return CallToolResult(
                 content=[
