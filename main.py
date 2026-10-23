@@ -9,7 +9,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, llm_tool
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import Image
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import error_response, json_response, request
@@ -24,7 +24,10 @@ INSTRUCTIONS = """你可以使用共享表情图库，为当前回复寻找自�
 用 meme_search 按想表达的意思搜索；已有工具历史中的候选可以复用。
 发送前必须使用 meme_view 查看实际图片与当前名称、描述，结合画面和上下文判断。
 若决定发送，在后续一次工具调用中使用 meme_send，不能与 meme_view 并行调用。
-meme_send 会实际发送图片和可选配文，成功后避免再重复发送同一段文字或图片。
+meme_send 只负责实际发送图片，文字通过正常回复输出，成功后避免重复发送同一张图。
+图片本身足够表达时，设置 end_turn=true，发送成功即结束本轮；需要继续回复文字或使用其他工具时设为 false。
+end_turn=true 的发送应作为本轮最后一次工具调用，单独调用；发送失败会返回错误，继续处理。
+正常回复直接回应当前对话，避免额外汇报“已发送图片”等工具执行结果。
 普通群友也可以纠正用法，由你结合图片和上下文决定是否采纳；先读取当前信息，再用 meme_edit 修改名称和简短描述。
 名称优先保留能确认的角色、形象或表情系列，再加动作或情绪，例如“QQ企鹅被拿捏”；来源不确定时用可见特征命名。
 描述用一两句话写关键画面、配字和用途，避免长篇分析、通用禁忌和重复免责声明。
@@ -479,21 +482,23 @@ class MemeLibrary(Star):
         event: AstrMessageEvent,
         meme_id: str,
         expected_revision: int,
-        caption: str,
-    ) -> str:
-        """Send a visually reviewed meme, optionally with the final reply text.
+        end_turn: bool,
+    ) -> str | None:
+        """Send only a visually reviewed meme image.
 
         Args:
             meme_id(string): Stable ID already visually reviewed using meme_view in this turn.
             expected_revision(number): Integer current metadata revision used to choose the image.
-            caption(string): Final accompanying text, or an empty string for an image-only reply.
+            end_turn(boolean): True to end this turn after successfully sending the image, with no further model call. False to continue with normal reply text or other tools. Use true only in a final, standalone tool call.
 
         Returns:
-            Actual send status. On success, do not repeat this image or caption in the final response.
+            A successful send with end_turn=true returns no value and ends the turn. Otherwise returns image send status; errors always return a result for further handling. Put reply text in your normal response and avoid narrating the tool action or repeating the image.
         """
         try:
             if not self.config.get("enabled", True):
                 raise ValueError("disabled")
+            if not isinstance(end_turn, bool):
+                raise ValueError("end_turn_must_be_boolean")
             row = self.library.get(meme_id)
             if row["status"] != "ready" or row["revision"] != expected_revision:
                 raise ValueError("image_unavailable_or_revision_changed")
@@ -509,19 +514,28 @@ class MemeLibrary(Star):
             sent = set(event.get_extra("meme_library_sent", []))
             if meme_id in sent:
                 raise ValueError("already_sent_this_turn")
-            chain = ([Plain(caption)] if caption.strip() else []) + [
-                Image.fromFileSystem(self.library.path(row))
-            ]
+            chain = [Image.fromFileSystem(self.library.path(row))]
             # Reserve before awaiting platform I/O, including parallel tool calls.
             sent.add(meme_id)
             event.set_extra("meme_library_sent", list(sent))
             await event.send(MessageChain(chain))
+            if end_turn:
+                # A native tool finish skips the final LLM-response hook.
+                seq = event.get_extra("meme_library_notice_seq")
+                if isinstance(seq, int):
+                    try:
+                        self.library.acknowledge(event.unified_msg_origin, seq)
+                    except Exception as exc:
+                        self.logger.warning(
+                            "Image sent; library notice acknowledgement failed: %s",
+                            type(exc).__name__,
+                        )
+                return None
             return json.dumps(
                 {
                     "ok": True,
                     "sent": True,
                     **self.library.metadata(row),
-                    "caption": caption,
                 },
                 ensure_ascii=False,
             )

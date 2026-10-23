@@ -18,14 +18,19 @@ from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.message import TextPart, dump_messages_with_checkpoints
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
-from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.agent.tool import ToolSet
+from astrbot.core.astr_agent_run_util import run_agent
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
+from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
+    InternalAgentSubStage,
+)
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderRequest
 from astrbot.core.provider.provider import Provider
+from astrbot.core.provider.register import llm_tools
 from PIL import Image as PILImage
 
 from astrbot_plugin_meme_library.main import RECOGNITION, MemeLibrary
@@ -397,10 +402,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         e = event()
         req = ProviderRequest()
         e.set_extra("provider_request", req)
-        denied = json.loads(await self.plugin.send(e, row["id"], 1, ""))
+        denied = json.loads(await self.plugin.send(e, row["id"], 1, False))
         self.assertFalse(denied["sent"])
         await self.plugin.view(e, row["id"])
-        denied = json.loads(await self.plugin.send(e, row["id"], 1, ""))
+        denied = json.loads(await self.plugin.send(e, row["id"], 1, False))
         self.assertFalse(denied["sent"])
         req.tool_calls_result = [SimpleNamespace()]
 
@@ -409,8 +414,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         e.send.side_effect = slow_send
         results = await asyncio.gather(
-            self.plugin.send(e, row["id"], 1, "hello"),
-            self.plugin.send(e, row["id"], 1, "hello"),
+            self.plugin.send(e, row["id"], 1, False),
+            self.plugin.send(e, row["id"], 1, False),
         )
         self.assertEqual(sum(json.loads(r)["sent"] for r in results), 1)
         self.assertEqual(e.send.await_count, 1)
@@ -433,14 +438,17 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.plugin.library.get(row["id"])["description"], result["description"]
         )
-        stale = json.loads(await self.plugin.send(e, row["id"], 1, ""))
+        stale = json.loads(await self.plugin.send(e, row["id"], 1, False))
         self.assertFalse(stale["sent"])
         e.send.assert_not_awaited()
 
-    async def test_actual_runner_sees_image_then_sends_and_keeps_tool_history(self):
+    async def _run_image_reply(self, *, end_turn, fail_send=False):
         row = self.ready()
         e = event()
         seen = []
+        e.set_extra("meme_library_notice_seq", self.plugin.library.latest_seq())
+        if fail_send:
+            e.send.side_effect = RuntimeError("simulated platform send failure")
 
         async def completion(**kwargs):
             seen.append(copy.deepcopy(kwargs["contexts"]))
@@ -463,7 +471,6 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("instruction", metadata)
                 self.assertNotIn("sent", metadata)
                 self.assertIn("data:image/jpeg;base64,", json.dumps(kwargs["contexts"]))
-                self.assertIn("local_path", json.dumps(kwargs["contexts"]))
                 self.assertIn(
                     str(self.plugin.library.path(row).resolve()),
                     json.dumps(kwargs["contexts"]),
@@ -475,45 +482,36 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "meme_id": row["id"],
                             "expected_revision": 1,
-                            "caption": "恭喜",
+                            "end_turn": end_turn,
                         }
                     ],
                     tools_call_ids=["send-1"],
                 )
-            return LLMResponse(role="assistant", completion_text="已发送")
+            if end_turn and not fail_send:
+                raise AssertionError("Image-only turn must not call the model again")
+            return LLMResponse(
+                role="assistant",
+                completion_text="图片没发出去" if fail_send else "恭喜\n你真棒",
+            )
 
         self.provider.text_chat.side_effect = completion
-        tools = ToolSet(
-            [
-                FunctionTool(
-                    name="meme_view",
-                    description="view",
-                    parameters={
-                        "type": "object",
-                        "properties": {"meme_id": {"type": "string"}},
-                        "required": ["meme_id"],
-                    },
-                    handler=self.plugin.view,
-                ),
-                FunctionTool(
-                    name="meme_send",
-                    description="send",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "meme_id": {"type": "string"},
-                            "expected_revision": {"type": "number"},
-                            "caption": {"type": "string"},
-                        },
-                        "required": ["meme_id", "expected_revision", "caption"],
-                    },
-                    handler=self.plugin.send,
-                ),
-            ]
+        registered_tools = []
+        for name, handler in [
+            ("meme_view", self.plugin.view),
+            ("meme_send", self.plugin.send),
+        ]:
+            tool = copy.copy(llm_tools.get_func(name))
+            self.assertIsNotNone(tool)
+            tool.handler = handler
+            registered_tools.append(tool)
+        send_parameters = registered_tools[1].parameters["properties"]
+        self.assertEqual(
+            set(send_parameters), {"meme_id", "expected_revision", "end_turn"}
         )
+        self.assertEqual(send_parameters["end_turn"]["type"], "boolean")
         req = ProviderRequest(
             prompt="庆祝一下",
-            func_tool=tools,
+            func_tool=ToolSet(registered_tools),
             conversation=SimpleNamespace(cid="conv", token_usage=0),
         )
         e.set_extra("provider_request", req)
@@ -525,13 +523,28 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             tool_executor=FunctionToolExecutor(),
             agent_hooks=BaseAgentRunHooks(),
         )
-        async for _ in runner.step_until_done(5):
-            pass
+        replies = []
+        async for reply in run_agent(runner, max_step=5, show_tool_use=False):
+            replies.append(reply)
+        self.assertTrue(runner.done())
+        self.assertFalse(e.is_stopped())
         e.send.assert_awaited_once()
-        saved = dump_messages_with_checkpoints(runner.run_context.messages)
-        self.assertIn(
-            '"sent": true', json.dumps(saved, ensure_ascii=False).replace('\\"', '"')
+        chain = e.send.await_args.args[0].chain
+        self.assertEqual(len(chain), 1)
+        self.assertIsInstance(chain[0], Image)
+        stage = SimpleNamespace(
+            conv_manager=SimpleNamespace(update_conversation=AsyncMock())
         )
+        await InternalAgentSubStage._save_to_history(
+            stage,
+            e,
+            req,
+            runner.get_final_llm_resp(),
+            runner.run_context.messages,
+            runner.stats,
+        )
+        stage.conv_manager.update_conversation.assert_awaited_once()
+        saved = stage.conv_manager.update_conversation.await_args.kwargs["history"]
         self.assertTrue(
             any(
                 m.get("role") == "tool" and m.get("tool_call_id") == "view-1"
@@ -539,6 +552,79 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIn("data:image/jpeg;base64,", json.dumps(saved))
+        send_results = [
+            message
+            for message in saved
+            if message.get("role") == "tool" and message.get("tool_call_id") == "send-1"
+        ]
+        self.assertEqual(len(send_results), 1)
+        return runner, saved, send_results[0], replies
+
+    async def test_actual_runner_sends_only_image_and_continues_normal_reply(self):
+        runner, saved, result, replies = await self._run_image_reply(end_turn=False)
+        self.assertEqual(self.provider.text_chat.await_count, 3)
+        self.assertEqual(runner.get_final_llm_resp().completion_text, "恭喜\n你真棒")
+        self.assertEqual(
+            [reply.get_plain_text() for reply in replies], ["恭喜\n你真棒"]
+        )
+        self.assertEqual(saved[-1]["role"], "assistant")
+        self.assertEqual(
+            saved[-1]["content"], [{"type": "text", "text": "恭喜\n你真棒"}]
+        )
+        self.assertTrue(json.loads(result["content"])["sent"])
+        self.assertNotIn("caption", json.loads(result["content"]))
+
+    async def test_actual_runner_end_turn_skips_final_call_and_saves_tool_history(self):
+        runner, saved, result, replies = await self._run_image_reply(end_turn=True)
+        self.assertEqual(self.provider.text_chat.await_count, 2)
+        self.assertIsNone(runner.get_final_llm_resp())
+        self.assertEqual(replies, [])
+        self.assertEqual(
+            self.plugin.library.unseen(
+                runner.run_context.context.event.unified_msg_origin
+            ),
+            0,
+        )
+        self.assertTrue(result["content"])
+        self.assertFalse(
+            any(m.get("role") == "assistant" and not m.get("tool_calls") for m in saved)
+        )
+        send_call = next(
+            call
+            for message in saved
+            for call in message.get("tool_calls", [])
+            if call["function"]["name"] == "meme_send"
+        )
+        self.assertTrue(json.loads(send_call["function"]["arguments"])["end_turn"])
+
+    async def test_actual_runner_failed_end_turn_send_allows_error_response(self):
+        runner, saved, result, replies = await self._run_image_reply(
+            end_turn=True, fail_send=True
+        )
+        self.assertEqual(self.provider.text_chat.await_count, 3)
+        self.assertFalse(json.loads(result["content"])["sent"])
+        self.assertEqual(json.loads(result["content"])["error"], "RuntimeError")
+        self.assertEqual(
+            self.plugin.library.unseen(
+                runner.run_context.context.event.unified_msg_origin
+            ),
+            1,
+        )
+        self.assertEqual(
+            [reply.get_plain_text() for reply in replies], ["图片没发出去"]
+        )
+        self.assertEqual(
+            saved[-1]["content"], [{"type": "text", "text": "图片没发出去"}]
+        )
+
+    async def test_invalid_end_turn_is_rejected_before_sending(self):
+        row = self.ready()
+        e = event()
+        for invalid in ["false", 1, None]:
+            with self.subTest(end_turn=invalid):
+                result = json.loads(await self.plugin.send(e, row["id"], 1, invalid))
+                self.assertEqual(result["error"], "end_turn_must_be_boolean")
+        e.send.assert_not_awaited()
 
     async def test_semantic_search_uses_updated_document_across_batches(self):
         row = self.ready()
