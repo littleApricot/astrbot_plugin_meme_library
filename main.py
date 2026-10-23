@@ -17,6 +17,7 @@ from astrbot.core.agent.message import Message, TextPart
 from astrbot.core.message.message_event_result import MessageChain
 from mcp.types import CallToolResult, ImageContent, TextContent
 
+from .codex_vision import CodexRecognitionError, recognize_codex
 from .store import Library
 from .vision import inspect_image, parse_json, previews
 
@@ -192,26 +193,38 @@ class MemeLibrary(Star):
                         )
                         self.library.set_status(record["id"], "retried")
                         continue
-                    provider = await self._provider(
-                        record["origin"], record["provider_id"]
-                    )
-                    modalities = provider.provider_config.get("modalities")
-                    if modalities and "image" not in modalities:
-                        raise ValueError("vision_not_supported")
                     frames = await asyncio.to_thread(
                         previews, self.library.path(record)
                     )
-                    response = await asyncio.wait_for(
-                        provider.text_chat(
-                            prompt="图片附近的发言：" + record["source_text"],
-                            image_urls=frames,
-                            system_prompt=self._recognition_prompt(),
-                            contexts=[],
-                            func_tool=None,
-                        ),
-                        timeout=float(self.config.get("model_timeout", 45)),
-                    )
-                    value = parse_json(response.completion_text or "")
+                    backend = self.config.get("recognition_backend", "provider")
+                    if backend == "codex":
+                        value = await recognize_codex(
+                            frames,
+                            self._recognition_prompt(),
+                            record["source_text"],
+                            str(self.config.get("codex_path", "")).strip(),
+                            float(self.config.get("codex_timeout", 120)),
+                        )
+                    elif backend == "provider":
+                        provider = await self._provider(
+                            record["origin"], record["provider_id"]
+                        )
+                        modalities = provider.provider_config.get("modalities")
+                        if modalities and "image" not in modalities:
+                            raise ValueError("vision_not_supported")
+                        response = await asyncio.wait_for(
+                            provider.text_chat(
+                                prompt="图片附近的发言：" + record["source_text"],
+                                image_urls=frames,
+                                system_prompt=self._recognition_prompt(),
+                                contexts=[],
+                                func_tool=None,
+                            ),
+                            timeout=float(self.config.get("model_timeout", 45)),
+                        )
+                        value = parse_json(response.completion_text or "")
+                    else:
+                        raise ValueError("invalid_recognition_backend")
                     if type(value.get("is_meme")) is not bool:
                         raise ValueError("invalid_recognition_result")
                     self.library.recognize(
@@ -229,11 +242,16 @@ class MemeLibrary(Star):
                     self.library.set_status(record["id"], "queued")
                     raise
                 except Exception as exc:
-                    self.library.set_status(record["id"], "failed", type(exc).__name__)
+                    error = (
+                        str(exc)
+                        if isinstance(exc, CodexRecognitionError)
+                        else type(exc).__name__
+                    )
+                    self.library.set_status(record["id"], "failed", error)
                     self.logger.warning(
                         "Meme recognition failed: %s %s",
                         record["id"],
-                        type(exc).__name__,
+                        error,
                     )
 
     @filter.on_llm_request(priority=9000)

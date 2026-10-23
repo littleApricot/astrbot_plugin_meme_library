@@ -4,11 +4,30 @@
     "description": "启用表情图库",
     "default": true
   },
+  "recognition_backend": {
+    "type": "string",
+    "description": "新图片识别方式",
+    "default": "provider",
+    "options": ["provider", "codex"],
+    "hint": "provider 使用 AstrBot 模型；codex 使用运行 AstrBot 的本机 Codex CLI 调用 gpt-6-astra，复用该系统用户的 ChatGPT 登录。只影响新图片识别和失败重试。"
+  },
+  "codex_path": {
+    "type": "string",
+    "description": "本机 Codex 可执行文件路径",
+    "default": "",
+    "hint": "codex 方式使用。留空从 PATH 或 ~/.local/bin/codex 查找；也可填写完整路径。必须在 AstrBot 所在主机、同一系统用户下完成 codex login。"
+  },
+  "codex_timeout": {
+    "type": "int",
+    "description": "本机 Codex 识图超时秒数",
+    "default": 120,
+    "hint": "包含 CLI 启动和 Astra 识别耗时。超时会终止调用，图片保留为失败状态，可在图库管理页重试。"
+  },
   "recognition_provider_id": {
     "type": "string",
     "description": "收图与语义搜索模型",
     "default": "",
-    "hint": "留空使用来源会话的当前回复模型，收图模型需要支持图片输入。发送前预览仍由当前回复模型完成。",
+    "hint": "用于语义搜索；新图片识别方式为 provider 时也用于收图。留空使用来源会话当前回复模型，收图模型需要支持图片输入。发送前预览由当前回复模型完成。",
     "_special": "select_provider"
   },
   "recognition_prompt": {
