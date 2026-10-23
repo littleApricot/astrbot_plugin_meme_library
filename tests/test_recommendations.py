@@ -1,5 +1,6 @@
 """Verify local ranking, real message usage and transient provider-only hints."""
 
+import base64
 import copy
 import json
 import sqlite3
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from astrbot.api.message_components import Image
-from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
+from astrbot.core.agent.message import Message, TextPart, dump_messages_with_checkpoints
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
 from astrbot.core.agent.tool import ToolSet
@@ -247,6 +248,13 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("meme_search", payload)
             self.assertIn("OLD" * 3000, payload)
             self.assertIn("人格与记忆", payload)
+            self.assertNotIn(
+                RECOMMENDATION_HEADER,
+                str([m for m in call["contexts"] if m["role"] == "system"]),
+            )
+            self.assertEqual(call["contexts"][-1]["role"], "user")
+            self.assertIn(RECOMMENDATION_HEADER, str(call["contexts"][-1]["content"]))
+            self.assertNotIn(RECOMMENDATION_HEADER, str(call["contexts"][:-1]))
             incoming.send.assert_not_awaited()
         current = self.plugin.library.get(row["id"])
         self.assertEqual(current["recommendation_count"], 2)
@@ -315,7 +323,7 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         incoming.send.assert_awaited_once()
 
-    async def test_real_openai_adapter_sends_the_temporary_hint_to_the_sdk(self):
+    async def test_real_openai_adapter_preserves_full_prefix_when_hints_change(self):
         row = self.ready()
         previous = self.provider
         provider = ProviderOpenAIOfficial(
@@ -346,22 +354,66 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.provider = provider
         try:
-            saved = await self.run_reply(
-                fixtures.event(),
-                ProviderRequest(
-                    prompt="hi", conversation=SimpleNamespace(cid="conv", token_usage=0)
-                ),
-            )
-            provider.client.chat.completions.create.assert_awaited_once()
-            messages = provider.client.chat.completions.create.await_args.kwargs[
-                "messages"
+            history = [
+                {"role": "user", "content": "完整旧历史" * 10000},
+                {"role": "assistant", "content": "原来的完整回复"},
             ]
-            serialized = json.dumps(messages, ensure_ascii=False)
-            self.assertEqual(serialized.count(RECOMMENDATION_HEADER), 1)
-            self.assertIn(row["id"], serialized)
-            self.assertNotIn("_no_save", serialized)
-            self.assertNotIn(
-                RECOMMENDATION_HEADER, json.dumps(saved, ensure_ascii=False)
+            image = (
+                "data:image/png;base64,"
+                + base64.b64encode(fixtures.image_bytes()).decode()
+            )
+            calls = []
+            for description in ("第一次的可选推荐", "另一次不同的推荐"):
+                request = ProviderRequest(
+                    prompt="当前用户消息",
+                    contexts=copy.deepcopy(history),
+                    system_prompt="固定人格与记忆",
+                    image_urls=[image],
+                    extra_user_content_parts=[
+                        TextPart(text="<Quoted Message>引用原文</Quoted Message>")
+                    ],
+                    conversation=SimpleNamespace(cid="conv", token_usage=0),
+                )
+                with patch.object(
+                    self.plugin.library,
+                    "recommend",
+                    return_value=[dict(row, description=description)],
+                ):
+                    saved = await self.run_reply(fixtures.event(), request)
+                messages = copy.deepcopy(
+                    provider.client.chat.completions.create.await_args.kwargs[
+                        "messages"
+                    ]
+                )
+                calls.append(messages)
+                serialized = json.dumps(messages, ensure_ascii=False)
+                self.assertEqual(serialized.count(RECOMMENDATION_HEADER), 1)
+                self.assertIn(row["id"], serialized)
+                self.assertIn(description, serialized)
+                self.assertIn("完整旧历史" * 10000, serialized)
+                self.assertNotIn("_no_save", serialized)
+                self.assertEqual(
+                    [m["role"] for m in messages],
+                    ["system", "user", "assistant", "user"],
+                )
+                self.assertNotIn(RECOMMENDATION_HEADER, str(messages[:-1]))
+                self.assertIn(RECOMMENDATION_HEADER, str(messages[-1]))
+                current_parts = messages[-1]["content"]
+                self.assertIn("当前用户消息", str(current_parts))
+                self.assertIn("引用原文", str(current_parts))
+                self.assertTrue(
+                    any(p.get("type") == "image_url" for p in current_parts)
+                )
+                self.assertEqual(request.contexts, history)
+                self.assertEqual(request.image_urls, [image])
+                self.assertNotIn(
+                    RECOMMENDATION_HEADER, json.dumps(saved, ensure_ascii=False)
+                )
+            self.assertEqual(provider.client.chat.completions.create.await_count, 2)
+            self.assertEqual(calls[0][:-1], calls[1][:-1])
+            self.assertEqual(calls[0][-1]["content"][:-1], calls[1][-1]["content"][:-1])
+            self.assertNotEqual(
+                calls[0][-1]["content"][-1], calls[1][-1]["content"][-1]
             )
         finally:
             self.provider = previous
@@ -397,6 +449,18 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
         text = str(context.messages)
         self.assertEqual(text.count(RECOMMENDATION_HEADER), 1)
         self.assertEqual(self.plugin.library.get(row["id"])["recommendation_count"], 1)
+        self.provider.text_chat.assert_not_awaited()
+
+    async def test_no_user_message_does_not_change_system_or_recommend(self):
+        row = self.ready()
+        incoming = fixtures.event()
+        context = SimpleNamespace(
+            messages=[Message(role="system", content="人格与记忆")]
+        )
+        before = copy.deepcopy(context.messages)
+        await self.plugin.notify_after_decision(incoming, context)
+        self.assertEqual(context.messages, before)
+        self.assertEqual(self.plugin.library.get(row["id"])["recommendation_count"], 0)
         self.provider.text_chat.assert_not_awaited()
 
     async def test_received_images_update_usage_once_across_groups_not_on_recognition(

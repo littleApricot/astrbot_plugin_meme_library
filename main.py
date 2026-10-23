@@ -284,8 +284,16 @@ class MemeLibrary(Star):
             and decision.get("reply") is False
         ):
             return
+        current_message = next(
+            (
+                message
+                for message in reversed(run_context.messages)
+                if message.role == "user"
+            ),
+            None,
+        )
         recommendation = event.get_extra("meme_library_recommendation_text")
-        if recommendation is None:
+        if recommendation is None and current_message is not None:
             try:
                 rows = self.library.recommend()
                 recommendation = (
@@ -308,27 +316,18 @@ class MemeLibrary(Star):
                     "Meme recommendations failed: %s", type(exc).__name__
                 )
             event.set_extra("meme_library_recommendation_text", recommendation)
-        if recommendation:
-            # Operate only on this runner, after reply admission. Temporary parts
-            # reach the provider but AstrBot removes them when saving history.
-            for message in run_context.messages:
-                if message.role != "system":
-                    continue
-                if isinstance(message.content, str):
-                    message.content = [TextPart(text=message.content)]
-                if not any(
-                    getattr(part, "text", None) == recommendation
-                    for part in message.content
-                ):
-                    message.content.append(TextPart(text=recommendation).mark_as_temp())
-                break
-            else:
-                run_context.messages.insert(
-                    0,
-                    Message(
-                        role="system",
-                        content=[TextPart(text=recommendation).mark_as_temp()],
-                    ),
+        if recommendation and current_message is not None:
+            # Keep changing hints after the complete history, beside this turn's
+            # user content, so they do not invalidate the shared system/history
+            # prefix. Temporary parts are removed by AstrBot's history writer.
+            if isinstance(current_message.content, str):
+                current_message.content = [TextPart(text=current_message.content)]
+            if not any(
+                getattr(part, "text", None) == recommendation
+                for part in current_message.content
+            ):
+                current_message.content.append(
+                    TextPart(text=recommendation).mark_as_temp()
                 )
         if not isinstance(decision, dict) or decision.get("reply") is not True:
             return
