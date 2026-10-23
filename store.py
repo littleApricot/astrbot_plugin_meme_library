@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
 import sqlite3
 import time
@@ -54,6 +55,9 @@ class Library:
                 origin TEXT NOT NULL, provider_id TEXT NOT NULL, source_text TEXT NOT NULL,
                 error TEXT NOT NULL DEFAULT '', added_seq INTEGER NOT NULL DEFAULT 0,
                 source_ref TEXT NOT NULL DEFAULT '',
+                use_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at REAL NOT NULL DEFAULT 0,
+                recommendation_count INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL, updated_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS revisions (
@@ -71,6 +75,13 @@ class Library:
             self.db.execute(
                 "ALTER TABLE memes ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''"
             )
+        for field, declaration in (
+            ("use_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_used_at", "REAL NOT NULL DEFAULT 0"),
+            ("recommendation_count", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if field not in columns:
+                self.db.execute(f"ALTER TABLE memes ADD COLUMN {field} {declaration}")
         # Preserve original legacy text in its existing column and revisions.
         for table in ("memes", "revisions"):
             columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
@@ -228,6 +239,71 @@ class Library:
                 (status, status, query, query, query, query, limit, offset),
             )
         ]
+
+    def record_use(self, meme_id: str) -> None:
+        """Count one received image or successful bot send, independently of exposure.
+
+        Args:
+            meme_id: Stable ID of the image actually used in a message.
+
+        Raises:
+            ValueError: The image no longer exists.
+        """
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE memes SET use_count=use_count+1,last_used_at=? WHERE id=?",
+                (time.time(), meme_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("image_not_found")
+
+    def recommend(self) -> list[dict]:
+        """Select four ranked memes and one uniform random remaining meme locally.
+
+        Each exposure reduces the new-image bonus by one step, reaching zero
+        after four recommendations. Within a step, use in the last 24 hours and
+        lifetime usage frequency provide smaller bonuses. Recency and frequency
+        take over once the new-image bonus is exhausted. Only actual received
+        images and successful sends update usage; recommending only counts as
+        exposure. Existing images start with zero statistics on upgrade.
+
+        Returns:
+            Up to five distinct ready records, with the random choice last.
+            Every selected record receives one exposure, including the random
+            choice. Original metadata, revisions and notice cursors stay intact.
+        """
+        now = time.time()
+        with self.db:
+            candidates = [
+                row
+                for row in self.records(status="ready", limit=2_000_000_000)
+                if row["filename"]
+                and row["name"]
+                and row["description"]
+                and self.path(row).is_file()
+            ]
+            # Compare priorities in order; no model, text matching or paid call.
+            ranked = sorted(
+                candidates,
+                key=lambda row: (
+                    max(0, 4 - row["recommendation_count"]),
+                    row["last_used_at"]
+                    if row["last_used_at"] > 0 and row["last_used_at"] >= now - 86400
+                    else 0,
+                    row["use_count"],
+                    row["created_at"],
+                    row["id"],
+                ),
+                reverse=True,
+            )
+            selected = ranked[:4]
+            if len(ranked) > 4:
+                selected.append(random.SystemRandom().choice(ranked[4:]))
+            self.db.executemany(
+                "UPDATE memes SET recommendation_count=recommendation_count+1 WHERE id=?",
+                [(row["id"],) for row in selected],
+            )
+        return selected
 
     def counts(self) -> dict:
         return dict(

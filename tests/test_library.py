@@ -155,6 +155,8 @@ class StoreTests(unittest.TestCase):
         try:
             row = migrated.get("old")
             self.assertEqual(row["document"], original)
+            for field in ("use_count", "last_used_at", "recommendation_count"):
+                self.assertEqual(row[field], 0)
             self.assertLessEqual(len(row["name"]), 24)
             self.assertLessEqual(len(row["description"]), 120)
             self.assertEqual(migrated.path(row).read_bytes(), image)
@@ -502,9 +504,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             tool.handler = handler
             registered_tools.append(tool)
         send_parameters = registered_tools[1].parameters["properties"]
-        self.assertEqual(
-            set(send_parameters), {"meme_id", "expected_revision"}
-        )
+        self.assertEqual(set(send_parameters), {"meme_id", "expected_revision"})
         req = ProviderRequest(
             prompt="庆祝一下",
             func_tool=ToolSet(registered_tools),
