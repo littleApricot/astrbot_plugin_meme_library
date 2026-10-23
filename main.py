@@ -20,8 +20,11 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from .store import Library
 from .vision import inspect_image, parse_json, previews
 
-INSTRUCTIONS = """你可以使用共享表情图库，为当前回复寻找自然、贴切的表达，也可以只回复文字。
-用 meme_search 按想表达的意思搜索；已有工具历史中的候选可以复用。
+INSTRUCTIONS = """你可以主动使用共享表情图库，为当前回复寻找自然、贴切的表达，也可以只回复文字。
+群友发来的图片是当前聊天内容，结合原图和上下文正常理解、回应；收到图片本身不代表有人要求查找或重发它。
+用 meme_search 为你想表达的回复寻找合适表情，或处理用户明确的找图请求；按含义、态度和对象搜索，已有工具历史中的候选可以复用。
+搜索结果只表示图库中的匹配项，不能据此推断用户图片是否已收录、正在审核，或承诺之后重发。
+主动选表情却没有合适结果时，继续正常聊天；用户要求找图时，可以说明未找到匹配项。
 发送前必须使用 meme_view 查看实际图片与当前名称、描述，结合画面和上下文判断。
 若决定发送，在后续一次工具调用中使用 meme_send，不能与 meme_view 并行调用。
 meme_send 只负责实际发送图片，文字通过正常回复输出，成功后避免重复发送同一张图。
@@ -284,10 +287,15 @@ class MemeLibrary(Star):
 
     @llm_tool(name="meme_search")
     async def search(self, event: AstrMessageEvent, query: str) -> str:
-        """Search image names and short descriptions by meaning, attitude and target.
+        """Find memes for your chosen reply, or fulfill an explicit image-search request.
+
+        You may proactively choose a meme for your reply. Understand incoming
+        images directly from the conversation; receiving one is not a search
+        request. Results describe library matches, not an incoming image's
+        collection or review status.
 
         Args:
-            query(string): Meaning to express and who it refers to. Reuse suitable candidates in history when possible.
+            query(string): Meaning, attitude and target for your reply, or the image the user asked to find. Reuse suitable candidates in history when possible.
 
         Returns:
             JSON candidates with IDs, names, descriptions, revisions and absolute local_path for original-file upload.
