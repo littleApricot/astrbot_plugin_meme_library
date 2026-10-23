@@ -186,7 +186,7 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(added)
         self.assertEqual(again["status"], "disabled")
-        stale = json.loads(await self.plugin.send(incoming, row["id"], 1, False))
+        stale = json.loads(await self.plugin.send(incoming, row["id"], 1))
         self.assertFalse(stale["sent"])
         for group in ("group-a", "group-b"):
             found = json.loads(await self.plugin.search(fixtures.event(group), "开心"))

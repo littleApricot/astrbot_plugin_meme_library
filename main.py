@@ -28,8 +28,7 @@ INSTRUCTIONS = """你可以主动使用共享表情图库，为当前回复寻�
 发送前必须使用 meme_view 查看实际图片与当前名称、描述，结合画面和上下文判断。
 若决定发送，在后续一次工具调用中使用 meme_send，不能与 meme_view 并行调用。
 meme_send 只负责实际发送图片，文字通过正常回复输出，成功后避免重复发送同一张图。
-图片本身足够表达时，设置 end_turn=true，发送成功即结束本轮；需要继续回复文字或使用其他工具时设为 false。
-end_turn=true 的发送应作为本轮最后一次工具调用，单独调用；发送失败会返回错误，继续处理。
+图片本身足够表达且本轮提供 silence 工具时，发送成功后可以单独调用 silence 结束本轮。
 正常回复直接回应当前对话，避免额外汇报“已发送图片”等工具执行结果。
 普通群友也可以纠正用法，由你结合图片和上下文决定是否采纳；先读取当前信息，再用 meme_edit 修改名称和简短描述。
 发现误收录或不适合继续使用的表情时，你可以主动停用；普通群友也可以提醒你删除，由你结合图片和上下文判断是否采纳。
@@ -540,23 +539,19 @@ class MemeLibrary(Star):
         event: AstrMessageEvent,
         meme_id: str,
         expected_revision: int,
-        end_turn: bool,
-    ) -> str | None:
+    ) -> str:
         """Send only a visually reviewed meme image.
 
         Args:
             meme_id(string): Stable ID already visually reviewed using meme_view in this turn.
             expected_revision(number): Integer current metadata revision used to choose the image.
-            end_turn(boolean): True to end this turn after successfully sending the image, with no further model call. False to continue with normal reply text or other tools. Use true only in a final, standalone tool call.
 
         Returns:
-            A successful send with end_turn=true returns no value and ends the turn. Otherwise returns image send status; errors always return a result for further handling. Put reply text in your normal response and avoid narrating the tool action or repeating the image.
+            Returns image send status and metadata, or an error. Put reply text in your normal response and avoid narrating the tool action or repeating the image. If the image is sufficient and the separate silence tool is available, call silence after inspecting the send result.
         """
         try:
             if not self.config.get("enabled", True):
                 raise ValueError("disabled")
-            if not isinstance(end_turn, bool):
-                raise ValueError("end_turn_must_be_boolean")
             row = self.library.get(meme_id)
             if row["status"] != "ready" or row["revision"] != expected_revision:
                 raise ValueError("image_unavailable_or_revision_changed")
@@ -577,18 +572,15 @@ class MemeLibrary(Star):
             sent.add(meme_id)
             event.set_extra("meme_library_sent", list(sent))
             await event.send(MessageChain(chain))
-            if end_turn:
-                # A native tool finish skips the final LLM-response hook.
-                seq = event.get_extra("meme_library_notice_seq")
-                if isinstance(seq, int):
-                    try:
-                        self.library.acknowledge(event.unified_msg_origin, seq)
-                    except Exception as exc:
-                        self.logger.warning(
-                            "Image sent; library notice acknowledgement failed: %s",
-                            type(exc).__name__,
-                        )
-                return None
+            seq = event.get_extra("meme_library_notice_seq")
+            if isinstance(seq, int):
+                try:
+                    self.library.acknowledge(event.unified_msg_origin, seq)
+                except Exception as exc:
+                    self.logger.warning(
+                        "Image sent; library notice acknowledgement failed: %s",
+                        type(exc).__name__,
+                    )
             return json.dumps(
                 {
                     "ok": True,
