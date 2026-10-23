@@ -32,6 +32,9 @@ meme_send 只负责实际发送图片，文字通过正常回复输出，成功�
 end_turn=true 的发送应作为本轮最后一次工具调用，单独调用；发送失败会返回错误，继续处理。
 正常回复直接回应当前对话，避免额外汇报“已发送图片”等工具执行结果。
 普通群友也可以纠正用法，由你结合图片和上下文决定是否采纳；先读取当前信息，再用 meme_edit 修改名称和简短描述。
+发现误收录或不适合继续使用的表情时，你可以主动停用；普通群友也可以提醒你删除，由你结合图片和上下文判断是否采纳。
+先用 meme_view 确认具体图片，再在后续一次工具调用中用 meme_disable 提交当前版本和停用原因。目标不明确时先确认，不凭模糊描述批量停用。
+所谓删除是停用：所有群共用的图库会停止搜索和发送该图，原文件与名称、描述保留；同一文件再次出现也保持停用。
 名称优先保留能确认的角色、形象或表情系列，再加动作或情绪，例如“QQ企鹅被拿捏”；来源不确定时用可见特征命名。
 描述用一两句话写关键画面、配字和用途，避免长篇分析、通用禁忌和重复免责声明。
 搜索和查看结果中的 local_path 是原图的完整本地路径，可作为 Wiki 上传工具的文件参数；GIF 路径指向原动图。
@@ -479,6 +482,53 @@ class MemeLibrary(Star):
                     "ok": True,
                     **self.library.metadata(row),
                 },
+                ensure_ascii=False,
+            )
+        except ValueError as exc:
+            return json.dumps({"ok": False, "error": str(exc)})
+
+    @llm_tool(name="meme_disable")
+    async def disable(
+        self,
+        event: AstrMessageEvent,
+        meme_id: str,
+        expected_revision: int,
+        reason: str,
+    ) -> str:
+        """Disable an existing meme after reviewing its image and current metadata.
+
+        Use this to remove an unsuitable or mistakenly collected meme from the
+        shared active library. You may act proactively or evaluate feedback from
+        any group member. Resolve an ambiguous target before making changes.
+
+        Args:
+            meme_id(string): Stable ID confirmed using meme_view in this turn.
+            expected_revision(number): Integer revision returned by the latest meme_view, called in an earlier model step of this turn.
+            reason(string): Nonempty explanation for disabling this particular image, based on the image or conversation.
+
+        Returns:
+            JSON with ok, status, current revision, name, description and local_path, or an error requiring rereading. Disabling affects all groups, retains the original file and metadata, and excludes the image from search and sending. Seeing the same file again does not re-enable it.
+        """
+        try:
+            if not self.config.get("enabled", True):
+                raise ValueError("disabled")
+            viewed = event.get_extra("meme_library_viewed", {}).get(meme_id)
+            req = event.get_extra("provider_request")
+            batch = len(req.tool_calls_result or []) if req else 0
+            if (
+                not viewed
+                or viewed["revision"] != expected_revision
+                or batch <= viewed["batch"]
+            ):
+                raise ValueError("read_current_metadata_first")
+            row = self.library.disable(
+                meme_id,
+                expected_revision,
+                reason,
+                "model:" + event.unified_msg_origin,
+            )
+            return json.dumps(
+                {"ok": True, "status": row["status"], **self.library.metadata(row)},
                 ensure_ascii=False,
             )
         except ValueError as exc:

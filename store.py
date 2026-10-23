@@ -325,6 +325,54 @@ class Library:
             )
         return self.get(meme_id)
 
+    def disable(self, meme_id: str, revision: int, reason: str, actor: str) -> dict:
+        """Retire a reviewed meme while preserving its file and metadata.
+
+        Args:
+            meme_id: Stable ID of the meme to retire from the shared library.
+            revision: Integer revision the caller has just reviewed.
+            reason: Nonempty explanation retained in the revision log.
+            actor: Model and source conversation making the change.
+
+        Returns:
+            Disabled record with its new revision, or the unchanged record if
+            already disabled at the expected revision.
+
+        Raises:
+            ValueError: Invalid input, stale revision or unavailable image.
+        """
+        if type(revision) is not int or revision < 1:
+            raise ValueError("invalid_revision")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason_required")
+        with self.db:
+            row = self.get(meme_id)
+            if row["revision"] != revision:
+                raise ValueError("revision_conflict")
+            if row["status"] == "disabled":
+                return row
+            if row["status"] != "ready":
+                raise ValueError("image_not_available")
+            now = time.time()
+            next_revision = revision + 1
+            self.db.execute(
+                "UPDATE memes SET status='disabled',revision=?,error='',updated_at=? WHERE id=?",
+                (next_revision, now, meme_id),
+            )
+            self.db.execute(
+                "INSERT INTO revisions(meme_id,revision,name,description,document,reason,actor,created_at) VALUES(?,?,?,?,'',?,?,?)",
+                (
+                    meme_id,
+                    next_revision,
+                    row["name"],
+                    row["description"],
+                    "停用：" + reason.strip(),
+                    actor,
+                    now,
+                ),
+            )
+        return self.get(meme_id)
+
     def revisions(self, meme_id: str) -> list[dict]:
         return [
             dict(r)
