@@ -182,11 +182,17 @@ class MemeLibrary(Star):
                     frames = await asyncio.to_thread(
                         previews, self.library.path(record)
                     )
+                    recognition_prompt = self.config.get("recognition_prompt")
+                    if (
+                        not isinstance(recognition_prompt, str)
+                        or not recognition_prompt.strip()
+                    ):
+                        recognition_prompt = RECOGNITION
                     response = await asyncio.wait_for(
                         provider.text_chat(
                             prompt="图片附近的发言：" + record["source_text"],
                             image_urls=frames,
-                            system_prompt=RECOGNITION,
+                            system_prompt=recognition_prompt,
                             contexts=[],
                             func_tool=None,
                         ),

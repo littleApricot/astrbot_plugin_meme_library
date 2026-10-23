@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from astrbot.api import AstrBotConfig
 from astrbot.api.message_components import Image, Plain
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.message import dump_messages_with_checkpoints
@@ -26,7 +27,7 @@ from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderRe
 from astrbot.core.provider.provider import Provider
 from PIL import Image as PILImage
 
-from astrbot_plugin_meme_library.main import MemeLibrary
+from astrbot_plugin_meme_library.main import RECOGNITION, MemeLibrary
 from astrbot_plugin_meme_library.store import Library
 from astrbot_plugin_meme_library.vision import inspect_image, previews
 
@@ -240,6 +241,44 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.collect(event("group-b", Image.fromFileSystem(path)))
         self.assertEqual(self.provider.text_chat.await_count, 1)
         self.assertEqual(self.plugin.library.counts(), {"ready": 1})
+
+    async def test_saved_recognition_prompt_reaches_worker_and_blank_uses_default(self):
+        schema = json.loads(
+            (Path(__file__).parents[1] / "_conf_schema.json").read_text()
+        )
+        config_path = Path(self.temp.name) / "plugin_config.json"
+        config_path.write_text(json.dumps({"enabled": True, "search_results": 3}))
+        config = AstrBotConfig(str(config_path), schema=schema)
+        self.assertEqual(config["recognition_prompt"], RECOGNITION)
+        self.assertEqual(config["search_results"], 3)
+        custom = (
+            "按群聊梗命名，描述只写用途。\n返回 JSON，包含 is_meme、name、description。"
+        )
+        for color, saved_prompt, expected in [
+            ("blue", custom, custom),
+            ("green", " \n ", RECOGNITION),
+        ]:
+            config["recognition_prompt"] = saved_prompt
+            config.save_config()
+            self.plugin.config = AstrBotConfig(str(config_path), schema=schema)
+            self.assertEqual(self.plugin.config["recognition_prompt"], saved_prompt)
+            row, _ = self.plugin.library.add(
+                image_bytes(color), ".png", "group-a", "", "附近的聊天"
+            )
+            self.plugin._start_worker()
+            for _ in range(100):
+                if self.plugin.library.get(row["id"])["status"] != "queued":
+                    break
+                await asyncio.sleep(0.01)
+            for _ in range(100):
+                if self.plugin.library.get(row["id"])["status"] != "processing":
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(self.plugin.library.get(row["id"])["status"], "ready")
+            call = self.provider.text_chat.await_args.kwargs
+            self.assertEqual(call["system_prompt"], expected)
+            self.assertIn("附近的聊天", call["prompt"])
+            self.assertTrue(call["image_urls"])
 
     async def test_failed_download_can_retry_and_deduplicates_real_image(self):
         path = Path(self.temp.name) / "retry.png"
