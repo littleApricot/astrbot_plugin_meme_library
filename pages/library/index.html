@@ -5,10 +5,11 @@
   <title>群聊表情图库</title>
   <style>
     :root{font:15px/1.6 system-ui,sans-serif;color:#252c3b;background:#f5f6fa}*{box-sizing:border-box}body{margin:0;padding:28px;max-width:1500px;margin:auto}h1{font-size:26px;margin:0}p{color:#687184;margin:4px 0 22px}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d7dbe5;background:white;color:#303c57;padding:8px 14px;border-radius:8px}button.primary{background:#4855b8;color:white;border-color:#4855b8}button:hover{filter:brightness(.96)}button:disabled{opacity:.5;cursor:default}input,select{border:1px solid #d7dbe5;border-radius:8px;padding:9px 12px;background:white}header,.toolbar,.actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}header{justify-content:space-between;margin-bottom:24px}.toolbar{margin-bottom:20px}.toolbar input{min-width:240px;flex:1}#stats{color:#687184}#status{min-height:25px;color:#4855b8}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(245px,1fr));gap:18px}.card{background:white;border:1px solid #e1e4ed;border-radius:12px;overflow:hidden;box-shadow:0 3px 12px #24304a06}.card img{width:100%;height:190px;object-fit:contain;background:#edf0f5;display:block}.body{padding:15px}.meta{font-size:12px;color:#687184}.desc{white-space:pre-wrap;max-height:150px;overflow:auto;font-size:14px;min-height:45px}.badge{display:inline-block;padding:2px 8px;border-radius:20px;background:#eef0fb;color:#4855b8;margin-bottom:8px}.error{color:#b54646}#empty{padding:65px 20px;text-align:center;color:#687184;background:white;border:1px dashed #ccd1df;border-radius:12px}dialog{width:min(860px,94vw);border:1px solid #d7dbe5;border-radius:12px;padding:24px}dialog::backdrop{background:#18223970}.editor{display:grid;grid-template-columns:220px 1fr;gap:20px}.editor img{width:100%;max-height:300px;object-fit:contain;background:#f0f2f6}.editor textarea{width:100%;min-height:110px;padding:12px;border:1px solid #ccd1df;border-radius:8px;resize:vertical}.editor input{width:100%;margin-bottom:14px}.path{font:12px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}.card h3{margin:5px 0;font-size:17px}.editor label{display:block;font-weight:600;margin-bottom:8px}.revisions{max-height:240px;overflow:auto;margin:18px 0}.revision{padding:12px;border-top:1px solid #e1e4ed}.revision pre{white-space:pre-wrap;font:inherit}.actions{margin-top:14px}footer{display:flex;justify-content:center;gap:15px;margin:26px 0}@media(max-width:600px){body{padding:16px}.editor{grid-template-columns:1fr}.editor img{max-height:180px}}
+    .prompt-editor label{display:block;font-weight:600;margin-bottom:8px}.prompt-editor textarea{width:100%;min-height:320px;padding:12px;border:1px solid #ccd1df;border-radius:8px;resize:vertical}.prompt-editor p{margin-bottom:14px}.header-actions{display:flex;gap:12px;flex-wrap:wrap}
   </style>
 </head>
 <body>
-  <header><div><h1>群聊表情图库</h1><p>所有群共用图库，每张图有名称和简短描述。</p></div><button id="refresh">刷新图库</button></header>
+  <header><div><h1>群聊表情图库</h1><p>所有群共用图库，每张图有名称和简短描述。</p></div><div class="header-actions"><button id="prompt-settings">识图提示词</button><button id="refresh">刷新图库</button></div></header>
   <div class="toolbar"><input id="query" aria-label="搜索图库" placeholder="搜索名称、描述或图片 ID"><select id="filter" aria-label="处理状态"><option value="">全部状态</option><option value="ready">可用</option><option value="queued">等待识别</option><option value="processing">识别中</option><option value="rejected">未收录</option><option value="failed">失败</option><option value="disabled">已停用</option></select><span id="stats"></span></div>
   <div id="status" role="status" aria-live="polite"></div><div id="empty" hidden></div><main id="grid"></main>
   <footer><button id="prev">上一页</button><span id="page"></span><button id="next">下一页</button></footer>
@@ -18,10 +19,17 @@
     <label for="local-path">原文件路径</label><input id="local-path" class="path" readonly>
     <div class="actions"><button id="save" class="primary">保存</button><button id="history">查看修改记录</button><button id="close">关闭</button></div>
   </div></div><div id="edit-status" role="status"></div><div id="revisions" class="revisions"></div></dialog>
+  <dialog id="prompt-editor" class="prompt-editor"><h2>识图提示词</h2>
+    <p>与插件配置共用同一个值。保存后用于后续新图片识别和失败重试，已有图片信息保留。留空使用默认提示词。</p>
+    <label for="recognition-prompt">图片名称与描述生成提示词</label><textarea id="recognition-prompt" rows="14"></textarea>
+    <p class="meta">返回 JSON，保留 is_meme（布尔值）、name（最多24字）和 description（最多120字）。</p>
+    <div class="actions"><button id="prompt-save" class="primary">保存提示词</button><button id="prompt-default">填入默认提示词</button><button id="prompt-close">关闭</button></div>
+    <div id="prompt-status" role="status" aria-live="polite"></div>
+  </dialog>
   <script>
     const states={ready:'可用',queued:'等待识别',processing:'识别中',rejected:'未收录',failed:'失败',disabled:'已停用',retried:'下载重试已完成'};
     const $=id=>document.getElementById(id);
-    let offset=0,current=null,loading=0;
+    let offset=0,current=null,loading=0,defaultPrompt='';
     const limit=40;
     async function api(method,path,body){
       const bridge=window.AstrBotPluginPage;
@@ -77,6 +85,24 @@
         }
       }catch(e){$('edit-status').textContent=e.message;}
     };
+    $('prompt-settings').onclick=async()=>{
+      $('prompt-settings').disabled=true;
+      try{
+        const r=await api('GET','recognition-prompt');defaultPrompt=r.default_prompt;
+        $('recognition-prompt').value=r.recognition_prompt;$('prompt-status').textContent='';$('prompt-editor').showModal();
+      }catch(e){$('status').textContent=e.message;}
+      finally{$('prompt-settings').disabled=false;}
+    };
+    $('prompt-save').onclick=async()=>{
+      $('prompt-save').disabled=true;$('prompt-default').disabled=true;$('recognition-prompt').disabled=true;
+      try{
+        await api('POST','recognition-prompt',{recognition_prompt:$('recognition-prompt').value});
+        $('prompt-status').textContent='已保存，后续识图使用此提示词。';
+      }catch(e){$('prompt-status').textContent=e.message;}
+      finally{$('prompt-save').disabled=false;$('prompt-default').disabled=false;$('recognition-prompt').disabled=false;}
+    };
+    $('prompt-default').onclick=()=>{$('recognition-prompt').value=defaultPrompt;$('prompt-status').textContent='已填入默认提示词，点击保存后生效。';};
+    $('prompt-close').onclick=()=>$('prompt-editor').close();
     $('close').onclick=()=>$('editor').close();$('refresh').onclick=load;
     $('filter').onchange=()=>{offset=0;load();};$('query').onkeydown=e=>{if(e.key==='Enter'&&!e.isComposing){offset=0;load();}};
     $('prev').onclick=()=>{offset=Math.max(0,offset-limit);load();};$('next').onclick=()=>{offset+=limit;load();};

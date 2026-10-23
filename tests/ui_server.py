@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import uvicorn
+from astrbot.api import AstrBotConfig
 from astrbot.api.web import PluginRequest, bind_request_context
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
@@ -30,7 +32,12 @@ with patch(
     "astrbot_plugin_meme_library.main.StarTools.get_data_dir",
     return_value=Path(temp.name),
 ):
-    plugin = MemeLibrary(SimpleNamespace(register_web_api=register), {"enabled": False})
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
+    )
+    config = AstrBotConfig(str(Path(temp.name) / "config.json"), schema=schema)
+    config.save_config(replace_config={"enabled": False})
+    plugin = MemeLibrary(SimpleNamespace(register_web_api=register), config)
 
 buffer = io.BytesIO()
 Image.new("RGB", (300, 180), "#d7daf5").save(buffer, format="PNG")

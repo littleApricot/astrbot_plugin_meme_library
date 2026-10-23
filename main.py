@@ -55,6 +55,7 @@ class MemeLibrary(Star):
             ("document", self.api_document, ["POST"]),
             ("revisions", self.api_revisions, ["GET"]),
             ("action", self.api_action, ["POST"]),
+            ("recognition-prompt", self.api_recognition_prompt, ["GET", "POST"]),
         ]:
             self.context.register_web_api(
                 f"/astrbot_plugin_meme_library/{route}",
@@ -70,6 +71,10 @@ class MemeLibrary(Star):
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._process_queue())
         self._wake.set()
+
+    def _recognition_prompt(self) -> str:
+        prompt = self.config.get("recognition_prompt")
+        return prompt if isinstance(prompt, str) and prompt.strip() else RECOGNITION
 
     async def _provider(
         self, origin: str, selected: str = "", *, configured: bool = True
@@ -182,17 +187,11 @@ class MemeLibrary(Star):
                     frames = await asyncio.to_thread(
                         previews, self.library.path(record)
                     )
-                    recognition_prompt = self.config.get("recognition_prompt")
-                    if (
-                        not isinstance(recognition_prompt, str)
-                        or not recognition_prompt.strip()
-                    ):
-                        recognition_prompt = RECOGNITION
                     response = await asyncio.wait_for(
                         provider.text_chat(
                             prompt="图片附近的发言：" + record["source_text"],
                             image_urls=frames,
-                            system_prompt=recognition_prompt,
+                            system_prompt=self._recognition_prompt(),
                             contexts=[],
                             func_tool=None,
                         ),
@@ -499,6 +498,36 @@ class MemeLibrary(Star):
                     else type(exc).__name__,
                 }
             )
+
+    async def api_recognition_prompt(self):
+        if request.method == "POST":
+            body = await request.json(default={})
+            if not isinstance(body, dict) or not isinstance(
+                body.get("recognition_prompt"), str
+            ):
+                return error_response("提示词必须是文本", status_code=400)
+            previous = self.config.get("recognition_prompt")
+            try:
+                self.config.save_config(
+                    replace_config={"recognition_prompt": body["recognition_prompt"]}
+                )
+            except OSError:
+                if previous is None:
+                    self.config.pop("recognition_prompt", None)
+                else:
+                    self.config["recognition_prompt"] = previous
+                return error_response(
+                    "保存失败，请检查配置文件写入权限后重试", status_code=500
+                )
+        prompt = self.config.get("recognition_prompt", RECOGNITION)
+        return json_response(
+            {
+                "recognition_prompt": prompt
+                if isinstance(prompt, str)
+                else RECOGNITION,
+                "default_prompt": RECOGNITION,
+            }
+        )
 
     async def api_list(self):
         limit = min(100, max(1, request.query.get("limit", 40, type=int)))
