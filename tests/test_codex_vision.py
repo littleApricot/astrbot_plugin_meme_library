@@ -35,7 +35,7 @@ class CodexProcessTests(unittest.IsolatedAsyncioTestCase):
         return str(self.binary)
 
     async def test_cli_contract_uses_all_frames_and_preserves_shared_prompt(self):
-        binary = self.executable('''import json, os, pathlib, sys
+        binary = self.executable("""import json, os, pathlib, sys
 args = sys.argv[1:]
 assert args[0:2] == ["exec", "-"]
 assert args[args.index("--model") + 1] == "gpt-6-astra"
@@ -57,12 +57,15 @@ assert schema["additionalProperties"] is False
 pathlib.Path(args[args.index("--output-last-message")+1]).write_text(json.dumps({
     "is_meme": True, "name": "角色笑", "description": "角色偷笑，用于调侃。"
 }))
-''')
-        with patch.dict(os.environ, {
-            "CODEX_API_KEY": "fixture-only",
-            "OPENAI_API_KEY": "fixture-only",
-            "OPENAI_BASE_URL": "https://invalid.example",
-        }):
+""")
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_API_KEY": "fixture-only",
+                "OPENAI_API_KEY": "fixture-only",
+                "OPENAI_BASE_URL": "https://invalid.example",
+            },
+        ):
             result = await recognize_codex(
                 self.frames, "shared custom instructions", "nearby message", binary
             )
@@ -79,9 +82,11 @@ pathlib.Path(args[args.index("--output-last-message")+1]).write_text(json.dumps(
         for cancel in (False, True):
             with self.subTest(cancel=cancel):
                 marker.unlink(missing_ok=True)
-                task = asyncio.create_task(recognize_codex(
-                    self.frames, "instructions", "", binary, 10 if cancel else 1
-                ))
+                task = asyncio.create_task(
+                    recognize_codex(
+                        self.frames, "instructions", "", binary, 10 if cancel else 1
+                    )
+                )
                 for _ in range(100):
                     if marker.is_file():
                         break
@@ -90,7 +95,9 @@ pathlib.Path(args[args.index("--output-last-message")+1]).write_text(json.dumps(
                 child = json.loads(marker.read_text())
                 if cancel:
                     task.cancel()
-                with self.assertRaises(asyncio.CancelledError if cancel else TimeoutError):
+                with self.assertRaises(
+                    asyncio.CancelledError if cancel else TimeoutError
+                ):
                     await task
                 with self.assertRaises(ProcessLookupError):
                     os.kill(child["pid"], 0)
@@ -119,37 +126,49 @@ class CodexRoutingTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = fixtures.PluginTests.asyncTearDown
     ready = fixtures.PluginTests.ready
 
-    async def test_only_collection_uses_codex_and_search_keeps_existing_provider(self):
-        self.plugin.config.update({
-            "recognition_backend": "codex",
-            "recognition_prompt": "shared editable prompt",
-        })
+    async def test_collection_uses_codex_and_search_stays_local(self):
+        self.plugin.config.update(
+            {
+                "recognition_backend": "codex",
+                "recognition_prompt": "shared editable prompt",
+            }
+        )
         row, _ = self.plugin.library.add(
             fixtures.image_bytes(), ".png", "group-a", "", "nearby message"
         )
-        with patch("astrbot_plugin_meme_library.main.recognize_codex", new=AsyncMock(
-            return_value={"is_meme": True, "name": "角色笑", "description": "角色偷笑。"}
-        )) as recognize:
+        with patch(
+            "astrbot_plugin_meme_library.main.recognize_codex",
+            new=AsyncMock(
+                return_value={
+                    "is_meme": True,
+                    "name": "角色笑",
+                    "description": "角色偷笑。",
+                }
+            ),
+        ) as recognize:
             self.plugin._start_worker()
             for _ in range(100):
                 if self.plugin.library.get(row["id"])["status"] == "ready":
                     break
                 await asyncio.sleep(0.01)
             self.assertEqual(self.plugin.library.get(row["id"])["status"], "ready")
-            self.assertEqual(recognize.await_args.args[1:3], (
-                "shared editable prompt", "nearby message"
-            ))
+            self.assertEqual(
+                recognize.await_args.args[1:3],
+                ("shared editable prompt", "nearby message"),
+            )
             self.provider.text_chat.assert_not_awaited()
-            self.provider.text_chat.return_value.completion_text = '{"matches":[]}'
-            await self.plugin.search(fixtures.event(), "偷笑")
-            self.provider.text_chat.assert_awaited_once()
+            found = json.loads(await self.plugin.search(fixtures.event(), "偷笑"))
+            self.assertEqual(found["candidates"][0]["id"], row["id"])
+            self.provider.text_chat.assert_not_awaited()
             recognize.assert_awaited_once()
 
     async def test_missing_cli_is_visible_without_falling_back_to_another_model(self):
-        self.plugin.config.update({
-            "recognition_backend": "codex",
-            "codex_path": str(Path(self.temp.name) / "missing-codex"),
-        })
+        self.plugin.config.update(
+            {
+                "recognition_backend": "codex",
+                "codex_path": str(Path(self.temp.name) / "missing-codex"),
+            }
+        )
         row, _ = self.plugin.library.add(
             fixtures.image_bytes(), ".png", "group-a", "", ""
         )

@@ -197,7 +197,7 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.library.get(row["id"])["status"], "disabled")
         self.assertEqual(self.plugin.library.revisions(row["id"])[0], audit)
 
-    async def test_inflight_search_omits_a_just_disabled_candidate(self):
+    async def test_local_search_omits_a_disabled_candidate_without_a_model(self):
         row = self.ready()
         incoming = fixtures.event()
         req = ProviderRequest()
@@ -205,22 +205,11 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.view(incoming, row["id"])
         req.tool_calls_result = [SimpleNamespace()]
 
-        async def completion(**kwargs):
-            self.assertIn(row["id"], kwargs["prompt"])
-            result = json.loads(
-                await self.plugin.disable(incoming, row["id"], 1, "误收")
-            )
-            self.assertTrue(result["ok"])
-            return LLMResponse(
-                role="assistant",
-                completion_text=json.dumps(
-                    {"matches": [{"id": row["id"], "score": 0.99}]}
-                ),
-            )
-
-        self.provider.text_chat.side_effect = completion
+        disabled = json.loads(await self.plugin.disable(incoming, row["id"], 1, "误收"))
+        self.assertTrue(disabled["ok"])
         result = json.loads(await self.plugin.search(fixtures.event("group-b"), "开心"))
         self.assertEqual(result["candidates"], [])
+        self.provider.text_chat.assert_not_awaited()
 
     async def test_invalid_input_disabled_plugin_and_repeat_leave_catalog_intact(self):
         row = self.ready()

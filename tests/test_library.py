@@ -220,9 +220,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             return_value=Path(self.temp.name),
         )
         self.patch.start()
-        self.plugin = MemeLibrary(
-            self.context, {"enabled": True, "search_batch_chars": 16000}
-        )
+        self.plugin = MemeLibrary(self.context, {"enabled": True})
 
     async def asyncTearDown(self):
         await self.plugin.terminate()
@@ -594,16 +592,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             saved[-1]["content"], [{"type": "text", "text": "图片没发出去"}]
         )
 
-    async def test_semantic_search_uses_updated_document_across_batches(self):
+    async def test_local_search_uses_updated_metadata_without_a_model(self):
         row = self.ready()
         self.plugin.library.edit(
             row["id"], "夸人厉害", "实际上表示夸人厉害", 1, "纠正", "model"
         )
-        self.provider.text_chat.return_value = LLMResponse(
-            role="assistant",
-            completion_text=json.dumps({"matches": [{"id": row["id"], "score": 0.95}]}),
-        )
-        result = json.loads(await self.plugin.search(event("group-b"), "夸人厉害"))
+        result = json.loads(await self.plugin.search(event("group-b"), "夸人 厉害"))
         self.assertEqual(result["candidates"][0]["revision"], 2)
         self.assertEqual(result["candidates"][0]["name"], "夸人厉害")
         self.assertNotIn("document", result["candidates"][0])
@@ -611,8 +605,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(path.is_absolute())
         self.assertEqual(path.read_bytes(), image_bytes())
         self.assertIn("夸人厉害", result["candidates"][0]["description"])
-        prompt = self.provider.text_chat.await_args.kwargs["prompt"]
-        self.assertNotIn("开心庆祝", prompt)
+        self.provider.text_chat.assert_not_awaited()
+        self.context.get_using_provider_async.assert_not_awaited()
 
     async def test_view_exposes_original_gif_path_for_upload_instead_of_preview(self):
         buffer = io.BytesIO()

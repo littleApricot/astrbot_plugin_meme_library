@@ -8,6 +8,7 @@ import random
 import re
 import sqlite3
 import time
+import unicodedata
 from pathlib import Path
 
 NAME_LIMIT = 24
@@ -273,7 +274,7 @@ class Library:
     def records(
         self, status: str = "", query: str = "", limit: int = 100, offset: int = 0
     ) -> list[dict]:
-        """Read a stable catalog page or active metadata for semantic search.
+        """Read a stable catalog page or current metadata.
 
         Args:
             status: Optional exact processing state.
@@ -290,6 +291,55 @@ class Library:
                 "SELECT * FROM memes WHERE (?='' OR status=?) AND (?='' OR instr(name,?)>0 OR instr(description,?)>0 OR instr(id,?)>0) ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
                 (status, status, query, query, query, query, limit, offset),
             )
+        ]
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """Rank ready images locally using their current name and description.
+
+        Args:
+            query: Keywords, a short phrase or an exact catalog ID.
+            limit: Maximum number of matching records.
+
+        Returns:
+            Current metadata with a local relevance score between zero and one.
+        """
+        query = " ".join(unicodedata.normalize("NFKC", query).casefold().split())
+        words = re.findall(r"[\u3400-\u9fff]+|[^\W_\u3400-\u9fff]+", query)
+        terms = set()
+        for word in words:
+            if re.fullmatch(r"[\u3400-\u9fff]{2,}", word):
+                terms.update(word[i : i + 2] for i in range(len(word) - 1))
+            else:
+                terms.add(word)
+        if not terms:
+            return []
+        total = sum(len(term) for term in terms)
+        matches = []
+        for row in self.records(status="ready", limit=2_000_000_000):
+            if not self.path(row).is_file():
+                continue
+            name = unicodedata.normalize("NFKC", row["name"]).casefold()
+            description = unicodedata.normalize("NFKC", row["description"]).casefold()
+            coverage = sum(
+                len(term) for term in terms if term in name or term in description
+            )
+            if query == row["id"]:
+                score = 1.0
+            elif coverage:
+                name_coverage = sum(len(term) for term in terms if term in name)
+                score = (
+                    0.7 * coverage / total
+                    + 0.15 * name_coverage / total
+                    + 0.1 * (query in name)
+                    + 0.05 * (query in description)
+                )
+            else:
+                continue
+            matches.append((score, row))
+        matches.sort(key=lambda item: (-item[0], -item[1]["created_at"], item[1]["id"]))
+        return [
+            {**self.metadata(row), "score": round(score, 4)}
+            for score, row in matches[: max(1, min(20, limit))]
         ]
 
     def record_use(self, meme_id: str) -> None:
