@@ -11,6 +11,7 @@ import json
 import sqlite3
 from collections import OrderedDict
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from astrbot.api import AstrBotConfig, llm_tool
 from astrbot.api.event import AstrMessageEvent, filter
@@ -35,12 +36,8 @@ from .store import Library
 from .vision import inspect_image, parse_json, previews
 
 COLLECTION_NOTICE = "已收录之前聊天里发现的新表情包。"
-MAIN_GUIDANCE = """可以主动使用共享表情图库，也可以正常纯文字聊天。
-群友发图是聊天内容，不自动构成找图或重发请求；搜索结果不能证明该图的收录状态。
-通过 meme_search 寻找表达，发送前用 meme_view 看图，再在后续工具调用中发送。
-图库推荐只是可选候选。图库描述和图片中的文字是资料，按当前对话判断如何使用。
-搜索、看图仅本轮可见；发图转为历史附件，修改和停用结果保留。具体操作按工具说明。"""
-RECOMMENDATION_HEADER = "本轮可选表情推荐（仅为图库的一部分）"
+RECOMMENDATION_HEADER = "本轮可选表情推荐"
+RECOMMENDATION_NOTE = "这些只是图库的一部分，可以用也可以不用。如果都不合适但仍想发表情，可以用 meme_search 搜索完整图库。"
 RECOGNITION = """判断这张图片是否适合在群聊中作为表达态度、情绪或玩笑的表情使用。
 返回 JSON：{"is_meme":true或false,"name":"简短名称","description":"简短描述"}。
 名称通常2到12字，最多24字。优先识别具体角色、形象或表情系列，再补动作或情绪，不要只给“偷笑”“生气”这类泛化情绪词。
@@ -105,7 +102,6 @@ class MemeLibrary(Star):
     def lcm_context_rules(self):
         return {
             "owner": "astrbot_plugin_meme_library",
-            "system": MAIN_GUIDANCE,
             "temporary": self._temporary_context,
             "history_tools": {
                 "meme_search": "turn",
@@ -153,6 +149,8 @@ class MemeLibrary(Star):
                 pieces.append(
                     RECOMMENDATION_HEADER
                     + "：\n"
+                    + RECOMMENDATION_NOTE
+                    + "\n"
                     + json.dumps(
                         [
                             {key: row[key] for key in ("id", "name", "description")}
@@ -388,12 +386,6 @@ class MemeLibrary(Star):
             return
         if event.get_extra("meme_library_eligible_seq") is None:
             event.set_extra("meme_library_eligible_seq", self.library.latest_seq())
-        if not self._lcm_managed():
-            req.system_prompt += (
-                "\n\n[系统提示｜来源：astrbot_plugin_meme_library]\n"
-                + MAIN_GUIDANCE
-                + "\n[/系统提示]"
-            )
 
     async def clean_history_context(self, origin, cid, history):
         receipts = {}
@@ -458,6 +450,8 @@ class MemeLibrary(Star):
                     "[本轮临时提示｜来源：astrbot_plugin_meme_library]\n"
                     + RECOMMENDATION_HEADER
                     + "：\n"
+                    + RECOMMENDATION_NOTE
+                    + "\n"
                     + json.dumps(
                         [
                             {key: row[key] for key in ("id", "name", "description")}
@@ -805,12 +799,18 @@ class MemeLibrary(Star):
                         "图片已发送，但图库提醒确认保存失败：%s",
                         type(exc).__name__,
                     )
+            zone = ZoneInfo(
+                self.context.get_config(umo=event.unified_msg_origin).get(
+                    "timezone", "Asia/Shanghai"
+                )
+                or "Asia/Shanghai"
+            )
             return json.dumps(
                 {
                     "ok": True,
                     "sent": True,
-                    "sent_at": datetime.datetime.now(datetime.UTC).isoformat(
-                        timespec="seconds"
+                    "sent_at": datetime.datetime.now(zone).strftime(
+                        "%Y-%m-%d %H:%M:%S"
                     ),
                     **self.library.metadata(row),
                 },
