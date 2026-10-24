@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import datetime
+import hashlib
 import json
 import sqlite3
+from collections import OrderedDict
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, llm_tool
@@ -74,6 +77,7 @@ class MemeLibrary(Star):
         super().__init__(context, config)
         self.config = config
         self.library = Library(StarTools.get_data_dir("astrbot_plugin_meme_library"))
+        self._decision_images = OrderedDict()
         self._history_bridge = OfficialContextBridge.acquire(self)
         self._wake = asyncio.Event()
         self._worker: asyncio.Task | None = None
@@ -158,6 +162,11 @@ class MemeLibrary(Star):
                     str(event.get_extra("selected_provider", "") or ""),
                     event.message_str,
                 )
+                for reference in (part.url, part.file, str(source)):
+                    if reference and len(str(reference)) <= 4096:
+                        self._decision_images[str(reference)] = record["id"]
+                while len(self._decision_images) > 10000:
+                    self._decision_images.popitem(last=False)
                 try:
                     self.library.record_use(record["id"])
                 except (sqlite3.Error, ValueError) as exc:
@@ -177,6 +186,45 @@ class MemeLibrary(Star):
                     "download_" + type(exc).__name__,
                 )
                 self.logger.warning("Meme snapshot failed: %s", type(exc).__name__)
+
+    async def decision_image_description(self, reference: str) -> str:
+        """Read existing metadata only; never download or invoke recognition."""
+        if not self.config.get("enabled", True) or not isinstance(reference, str):
+            return ""
+        ident = self._decision_images.get(reference)
+        if ident:
+            row = self.library.get(ident)
+        elif reference.startswith("data:image/") and ";base64," in reference:
+            if len(reference) > 24 * 1024 * 1024:
+                return ""
+            try:
+                data = base64.b64decode(reference.split(",", 1)[1], validate=True)
+            except ValueError:
+                return ""
+            row = self.library.by_digest(hashlib.sha256(data).hexdigest())
+        else:
+            # Original files from meme_send/meme_view can occur in retained history.
+            ref = (
+                reference.removeprefix("file:///")
+                if reference.startswith("file:///")
+                else reference
+            )
+            if reference.startswith("file:///"):
+                ref = "/" + ref
+            path = Path(ref)
+            if not path.is_absolute() or path.parent != self.library.root / "images":
+                return ""
+            row = self.library.by_filename(path.name)
+        if not row or not row["name"] or not row["description"]:
+            return ""
+        return (
+            "[图片；图库资料："
+            + json.dumps(
+                {key: row[key] for key in ("id", "name", "description")},
+                ensure_ascii=False,
+            )
+            + "]"
+        )
 
     async def _process_queue(self):
         while True:

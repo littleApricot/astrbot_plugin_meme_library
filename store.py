@@ -149,6 +149,18 @@ class Library:
             )
         return self.get(meme_id), True
 
+    def by_digest(self, digest: str):
+        row = self.db.execute(
+            "SELECT * FROM memes WHERE digest=?", (digest,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def by_filename(self, filename: str):
+        row = self.db.execute(
+            "SELECT * FROM memes WHERE filename=?", (filename,)
+        ).fetchone()
+        return dict(row) if row else None
+
     def get(self, meme_id: str) -> dict:
         """Return an exact record or fail without accepting file paths.
 

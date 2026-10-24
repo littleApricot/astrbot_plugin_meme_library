@@ -629,3 +629,41 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(metadata["local_path"].endswith(".gif"))
         self.assertEqual(Path(metadata["local_path"]).read_bytes(), data)
         self.assertEqual(result.content[1].mimeType, "image/jpeg")
+
+
+class DecisionMetadataTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_metadata_is_read_without_recognition(self):
+        from collections import OrderedDict
+
+        with tempfile.TemporaryDirectory() as directory:
+            library = Library(Path(directory))
+            try:
+                data = image_bytes()
+                row, _ = library.add(data, ".png", "group", "", "")
+                library.set_status(row["id"], "processing")
+                library.recognize(row["id"], "企鹅拿捏", "被拿捏或求饶", True)
+                plugin = object.__new__(MemeLibrary)
+                plugin.config = {}
+                plugin.library = library
+                plugin._decision_images = OrderedDict(
+                    [("https://isolated.invalid/image", row["id"])]
+                )
+                for reference in [
+                    "https://isolated.invalid/image",
+                    "data:image/png;base64," + base64.b64encode(data).decode(),
+                    str(library.path(row)),
+                ]:
+                    result = await plugin.decision_image_description(reference)
+                    self.assertIn("企鹅拿捏", result)
+                    self.assertIn("被拿捏", result)
+                self.assertEqual(
+                    await plugin.decision_image_description(
+                        "https://isolated.invalid/unknown"
+                    ),
+                    "",
+                )
+                self.assertEqual(
+                    await plugin.decision_image_description("/etc/passwd"), ""
+                )
+            finally:
+                library.close()
