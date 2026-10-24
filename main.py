@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import datetime
 import json
 import sqlite3
 from pathlib import Path
@@ -19,13 +20,22 @@ from astrbot.core.message.message_event_result import MessageChain
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .codex_vision import CodexRecognitionError, recognize_codex
+from .history import (
+    HistoryProjection,
+    OfficialContextBridge,
+    result_key,
+    sent_message,
+    tool_data,
+    tool_results,
+)
 from .store import Library
 from .vision import inspect_image, parse_json, previews
 
 INSTRUCTIONS = """你可以主动使用共享表情图库，为当前回复寻找自然、贴切的表达，也可以只回复文字。
 本轮若有可选表情推荐，可从中选择，也可以不用；推荐只是图库的一部分，其他图片仍可通过 meme_search 搜索，发送前仍须 meme_view 看图。
 群友发来的图片是当前聊天内容，结合原图和上下文正常理解、回应；收到图片本身不代表有人要求查找或重发它。
-用 meme_search 为你想表达的回复寻找合适表情，或处理用户明确的找图请求；按含义、态度和对象搜索，已有工具历史中的候选可以复用。
+用 meme_search 为你想表达的回复寻找合适表情，或处理用户明确的找图请求；按含义、态度和对象搜索，本轮工具结果中的候选可以复用。
+搜索、看图和发送的执行过程只在本轮可见；后续历史保留实际发送的图片、图片 ID 和正常回复，可按图片 ID 再次查看或纠正用法。
 搜索结果只表示图库中的匹配项，不能据此推断用户图片是否已收录、正在审核，或承诺之后重发。
 主动选表情却没有合适结果时，继续正常聊天；用户要求找图时，可以说明未找到匹配项。
 发送前必须使用 meme_view 查看实际图片与当前名称、描述，结合画面和上下文判断。
@@ -58,12 +68,13 @@ RECOGNITION = """判断这张图片是否适合在群聊中作为表达态度、
 
 
 class MemeLibrary(Star):
-    """Maintain a shared library without rewriting conversation history."""
+    """Maintain a shared library and retain sent images in future model context."""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context, config)
         self.config = config
         self.library = Library(StarTools.get_data_dir("astrbot_plugin_meme_library"))
+        self._history_bridge = OfficialContextBridge.acquire(self)
         self._wake = asyncio.Event()
         self._worker: asyncio.Task | None = None
         for route, handler, methods in [
@@ -274,6 +285,41 @@ class MemeLibrary(Star):
             "\n\n" + INSTRUCTIONS + "\n当前来源会话：" + event.unified_msg_origin
         )
 
+    async def clean_history_context(self, origin, cid, history):
+        receipts = {}
+        for name, message in tool_results(history):
+            if name != "meme_send":
+                continue
+            data = tool_data(message)
+            if (
+                data.get("ok") is not True
+                or data.get("sent") is not True
+                or not isinstance(data.get("id"), str)
+            ):
+                continue
+            try:
+                frames = await self._sent_preview(data["id"])
+            except (ValueError, OSError):
+                frames = []
+            receipts[result_key(message)] = sent_message(data, frames)
+        projection = HistoryProjection(history, receipts)
+        if not projection.active:
+            return history
+        entries = projection.entries(history)
+        cleaned = [message for _, message in entries]
+        if cleaned != history:
+            self.library.archive_tool_history(origin, cid, history, entries)
+        return cleaned
+
+    async def _sent_preview(self, meme_id: str) -> list[str]:
+        frames = self.library.sent_preview(meme_id)
+        if frames is None:
+            frames = await asyncio.to_thread(
+                previews, self.library.path(self.library.get(meme_id))
+            )
+            self.library.cache_sent_preview(meme_id, frames)
+        return frames
+
     @filter.on_agent_begin()
     async def notify_after_decision(self, event: AstrMessageEvent, run_context):
         decision = event.get_extra("reply_gate_decision")
@@ -372,7 +418,7 @@ class MemeLibrary(Star):
         collection or review status.
 
         Args:
-            query(string): Meaning, attitude and target for your reply, or the image the user asked to find. Reuse suitable candidates in history when possible.
+            query(string): Meaning, attitude and target for your reply, or the image the user asked to find. Reuse suitable candidates from this turn when possible.
 
         Returns:
             JSON candidates with IDs, names, descriptions, revisions and absolute local_path for original-file upload.
@@ -627,6 +673,7 @@ class MemeLibrary(Star):
         try:
             if not self.config.get("enabled", True):
                 raise ValueError("disabled")
+            await self._sent_preview(meme_id)
             row = self.library.get(meme_id)
             if row["status"] != "ready" or row["revision"] != expected_revision:
                 raise ValueError("image_unavailable_or_revision_changed")
@@ -666,6 +713,9 @@ class MemeLibrary(Star):
                 {
                     "ok": True,
                     "sent": True,
+                    "sent_at": datetime.datetime.now(datetime.UTC).isoformat(
+                        timespec="seconds"
+                    ),
                     **self.library.metadata(row),
                 },
                 ensure_ascii=False,
@@ -836,4 +886,6 @@ class MemeLibrary(Star):
         if self._worker:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
+        if self._history_bridge is not None:
+            await self._history_bridge.close(self)
         self.library.close()

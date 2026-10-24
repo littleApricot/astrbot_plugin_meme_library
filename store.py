@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import re
 import sqlite3
@@ -68,6 +69,11 @@ class Library:
                 PRIMARY KEY (meme_id, revision)
             );
             CREATE TABLE IF NOT EXISTS cursors (session TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS sent_previews (meme_id TEXT PRIMARY KEY, frames TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS tool_history_archive (
+                id TEXT PRIMARY KEY, origin TEXT NOT NULL, cid TEXT NOT NULL,
+                records TEXT NOT NULL, created_at REAL NOT NULL
+            );
         """)
         self.db.execute("UPDATE memes SET status='queued' WHERE status='processing'")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(memes)")}
@@ -198,6 +204,40 @@ class Library:
 
     def path(self, record: dict) -> Path:
         return self.root / "images" / record["filename"]
+
+    def sent_preview(self, meme_id: str) -> list[str] | None:
+        row = self.db.execute(
+            "SELECT frames FROM sent_previews WHERE meme_id=?", (meme_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def cache_sent_preview(self, meme_id: str, frames: list[str]) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO sent_previews VALUES (?,?)",
+                (meme_id, json.dumps(frames)),
+            )
+
+    def archive_tool_history(self, origin, cid, history, entries):
+        kept = dict(entries)
+        records = [
+            {"index": i, "message": message}
+            for i, message in enumerate(history)
+            if kept.get(i) != message
+        ]
+        if not records:
+            return
+        encoded = json.dumps(records, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(
+            json.dumps(
+                [origin, cid, history], ensure_ascii=False, sort_keys=True
+            ).encode()
+        ).hexdigest()
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO tool_history_archive VALUES (?,?,?,?,?)",
+                (digest, origin, cid, encoded, time.time()),
+            )
 
     def metadata(self, record: dict) -> dict:
         """Expose the same current metadata and original-file path to every client.
