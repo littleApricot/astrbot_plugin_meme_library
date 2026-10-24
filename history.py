@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import re
+from contextvars import ContextVar
 
 TRANSIENT_TOOLS = {"meme_search", "meme_view", "meme_send"}
 SENT_HEADER = "[历史记录：机器人已发送图片；以下是历史附件，不是用户新发言]"
@@ -179,70 +180,63 @@ def sent_message(data, frames):
 class OfficialContextBridge:
     """Clean official persisted model context before replies or compressors read it."""
 
-    def __init__(self, manager):
-        self.manager = manager
+    def __init__(self, database):
+        self.database = database
         self.owners = []
         self.pending = {}
         self.locks = {}
-        self.original_get = manager.get_conversation
-        self.original_update = manager.update_conversation
+        self.forwarding = ContextVar("meme_context_database_write", default=False)
+        self.original_get = database.get_conversation_by_id
+        self.original_update = database.update_conversation
         bridge = self
 
         async def update(
-            unified_msg_origin,
-            conversation_id=None,
-            history=None,
-            title=None,
-            persona_id=None,
-            token_usage=None,
+            cid, title=None, persona_id=None, content=None, token_usage=None
         ):
-            cid = conversation_id or await manager.get_curr_conversation_id(
-                unified_msg_origin
-            )
-            async with bridge.lock(unified_msg_origin, cid):
-                cleaned = await bridge.clean(unified_msg_origin, cid, history)
-                if cleaned != history:
+            # Stay below manager-level integrations: they may read context while
+            # holding their own lock before or after forwarding this write.
+            async with bridge.lock(cid):
+                conv = await bridge.original_get(cid) if content is not None else None
+                cleaned = await bridge.clean(conv.user_id if conv else "", cid, content)
+                if cleaned != content:
                     token_usage = 0
-                return await bridge.original_update(
-                    unified_msg_origin,
+                return await bridge.write(
                     cid,
-                    history=cleaned,
                     title=title,
                     persona_id=persona_id,
+                    content=cleaned,
                     token_usage=token_usage,
                 )
 
-        async def get(unified_msg_origin, conversation_id, create_if_not_exists=False):
-            async with bridge.lock(unified_msg_origin, conversation_id):
-                conv = await bridge.original_get(
-                    unified_msg_origin,
-                    conversation_id,
-                    create_if_not_exists=create_if_not_exists,
-                )
+        async def get(cid):
+            # SQLite's native update returns a fresh row through this same
+            # getter. It is already inside the write lock and already cleaned.
+            if bridge.forwarding.get():
+                return await bridge.original_get(cid)
+            async with bridge.lock(cid):
+                conv = await bridge.original_get(cid)
                 if conv is None:
                     return None
-                history = json.loads(conv.history or "[]")
-                cleaned = await bridge.clean(
-                    unified_msg_origin, conversation_id, history
-                )
+                history = conv.content or []
+                cleaned = await bridge.clean(conv.user_id, cid, history)
                 if cleaned != history:
-                    await bridge.original_update(
-                        unified_msg_origin,
-                        conversation_id,
-                        history=cleaned,
-                        token_usage=0,
-                    )
-                    conv = copy.copy(conv)
-                    conv.history = json.dumps(cleaned, ensure_ascii=False)
-                    conv.token_usage = 0
+                    await bridge.write(cid, content=cleaned, token_usage=0)
+                    return await bridge.original_get(cid)
                 return conv
 
         self.get_wrapper, self.update_wrapper = get, update
-        manager.get_conversation = get
-        manager.update_conversation = update
+        database.get_conversation_by_id = get
+        database.update_conversation = update
 
-    def lock(self, origin, cid):
-        return self.locks.setdefault((origin, cid), asyncio.Lock())
+    def lock(self, cid):
+        return self.locks.setdefault(cid, asyncio.Lock())
+
+    async def write(self, cid, **kwargs):
+        token = self.forwarding.set(True)
+        try:
+            return await self.original_update(cid, **kwargs)
+        finally:
+            self.forwarding.reset(token)
 
     async def clean(self, origin, cid, history):
         owner = next(
@@ -260,12 +254,13 @@ class OfficialContextBridge:
     @classmethod
     def acquire(cls, owner):
         manager = getattr(owner.context, "conversation_manager", None)
-        if manager is None:
+        database = getattr(manager, "db", None)
+        if database is None:
             return None
-        bridge = getattr(manager, "_meme_history_bridge", None)
+        bridge = getattr(database, "_meme_history_bridge", None)
         if bridge is None:
-            bridge = cls(manager)
-            manager._meme_history_bridge = bridge
+            bridge = cls(database)
+            database._meme_history_bridge = bridge
         bridge.owners.append(owner)
         return bridge
 
@@ -277,9 +272,9 @@ class OfficialContextBridge:
             await asyncio.gather(*pending, return_exceptions=True)
         if self.owners:
             return
-        if self.manager.get_conversation is self.get_wrapper:
-            self.manager.get_conversation = self.original_get
-        if self.manager.update_conversation is self.update_wrapper:
-            self.manager.update_conversation = self.original_update
-        if getattr(self.manager, "_meme_history_bridge", None) is self:
-            delattr(self.manager, "_meme_history_bridge")
+        if self.database.get_conversation_by_id is self.get_wrapper:
+            self.database.get_conversation_by_id = self.original_get
+        if self.database.update_conversation is self.update_wrapper:
+            self.database.update_conversation = self.original_update
+        if getattr(self.database, "_meme_history_bridge", None) is self:
+            delattr(self.database, "_meme_history_bridge")

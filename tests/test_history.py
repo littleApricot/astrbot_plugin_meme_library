@@ -97,7 +97,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def context_messages(self):
         # Read underlying storage too: this must not be a provider-only filter.
-        native = await self.database.get_conversation_by_id("ctx")
+        native = await self.bridge.original_get("ctx")
         conv = await self.manager.get_conversation(self.origin, "ctx")
         self.assertEqual(native.content, json.loads(conv.history))
         return native.content
@@ -225,9 +225,11 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                 ),
             },
         ]
-        await self.database.update_conversation("ctx", content=legacy)
+        await self.bridge.original_update("ctx", content=legacy)
         conv = await self.manager.get_conversation(self.origin, "ctx")
-        self.assertIn(SENT_HEADER, conv.history)
+        self.assertIn(
+            SENT_HEADER, json.dumps(json.loads(conv.history), ensure_ascii=False)
+        )
         self.assertEqual(await self.context_messages(), json.loads(conv.history))
         self.assertEqual(self.traces(), legacy)
 
@@ -420,7 +422,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(closing.done())
             release.set()
             await asyncio.wait_for(asyncio.gather(update, closing), 2)
-            self.assertFalse(hasattr(self.manager, "_meme_history_bridge"))
+            self.assertFalse(hasattr(self.database, "_meme_history_bridge"))
             self.assertEqual(
                 (await self.context_messages())[0]["content"], "保留的上下文"
             )
@@ -472,3 +474,83 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         visible = await self.context_messages()
         self.assertEqual(visible[0]["content"], raw[0]["content"][2:])
         self.assertEqual(self.traces(), raw)
+
+    async def test_lcm_shared_context_reads_and_writes_work_in_both_loading_orders(
+        self,
+    ):
+        try:
+            from astrbot_plugin_lcm.history_bridge import HistoryBridge
+            from astrbot_plugin_lcm.main import LCM
+            from astrbot_plugin_lcm.media import MediaArchive
+            from astrbot_plugin_lcm.store import Store
+        except ModuleNotFoundError as exc:
+            if exc.name and exc.name.startswith("astrbot_plugin_lcm"):
+                self.skipTest("Shared context integration requires LCM v0.2.0 sources")
+            raise
+        row = self.ready()
+        for lcm_first in (True, False):
+            with self.subTest(lcm_first=lcm_first):
+                await self.bridge.close(self.plugin)
+                owner = object.__new__(LCM)
+                owner.context = self.context
+                owner.config = {}
+                owner.store = Store(Path(self.temp.name) / f"lcm-{lcm_first}.sqlite3")
+                owner.media = MediaArchive(owner.store)
+                owner.wake = asyncio.Event()
+                lcm = None
+                try:
+                    if lcm_first:
+                        lcm = HistoryBridge(owner)
+                    self.bridge = self.plugin._history_bridge = (
+                        OfficialContextBridge.acquire(self.plugin)
+                    )
+                    if not lcm_first:
+                        lcm = HistoryBridge(owner)
+                    scope = owner.store.scope(self.origin, "ctx")
+                    raw = [
+                        {"role": "user", "content": "本轮输入"},
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "lcm-send",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "meme_send",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "lcm-send",
+                            "content": json.dumps(
+                                {
+                                    "ok": True,
+                                    "sent": True,
+                                    **self.plugin.library.metadata(row),
+                                }
+                            ),
+                        },
+                    ]
+                    # A background refresh owns LCM's lock while another task
+                    # attempts a save. Reading the same source must still work.
+                    async with lcm.lock(scope):
+                        saving = asyncio.create_task(
+                            self.manager.update_conversation(
+                                self.origin, "ctx", history=raw
+                            )
+                        )
+                        await asyncio.sleep(0.01)
+                        await asyncio.wait_for(lcm.read(self.origin, "ctx"), 1)
+                    await asyncio.wait_for(saving, 2)
+                    await asyncio.wait_for(lcm.refresh(self.origin, "ctx"), 2)
+                    source = owner.store.native_history(scope)["messages"]
+                    self.assertIn(row["id"], json.dumps(source))
+                    self.assertNotIn("tool_call_id", json.dumps(source))
+                    self.assertNotIn("tool_calls", json.dumps(source))
+                    self.assertEqual(source, await self.context_messages())
+                finally:
+                    if lcm is not None:
+                        lcm.close()
