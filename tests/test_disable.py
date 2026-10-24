@@ -87,7 +87,7 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         )
         incoming.set_extra("provider_request", req)
         await self.plugin.prepare(incoming, req)
-        self.assertIn("meme_disable", req.system_prompt)
+        self.assertIn("停用", llm_tools.get_func("meme_disable").description)
         runner = ToolLoopAgentRunner()
         await runner.reset(
             provider=self.provider,

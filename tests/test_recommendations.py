@@ -243,8 +243,8 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
                 ensure_ascii=False,
             )
             self.assertEqual(payload.count(RECOMMENDATION_HEADER), 1)
-            self.assertIn("可以发送，也可以不用", payload)
-            self.assertIn("只是图库", request.system_prompt)
+            self.assertIn("图库推荐只是可选候选", payload)
+            self.assertIn("图库推荐只是可选候选", request.system_prompt)
             self.assertIn("meme_search", payload)
             self.assertIn("OLD" * 3000, payload)
             self.assertIn("人格与记忆", payload)

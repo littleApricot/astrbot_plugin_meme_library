@@ -45,7 +45,9 @@ class NoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.contexts, [{"role": "user", "content": "之前的聊天"}])
         self.assertEqual(request.extra_user_content_parts, [])
         incoming.send.assert_not_awaited()
-        return dump_messages_with_checkpoints(runner.run_context.messages)
+        saved = dump_messages_with_checkpoints(runner.run_context.messages)
+        self.assertNotIn(COLLECTION_NOTICE, str(saved))
+        return [message.model_dump() for message in runner.run_context.messages]
 
     def has_notice(self, messages):
         matching = [
@@ -55,7 +57,7 @@ class NoticeTests(unittest.IsolatedAsyncioTestCase):
         ]
         if matching:
             self.assertEqual(len(matching), 1)
-            self.assertEqual(matching[0]["role"], "system")
+            self.assertEqual(matching[0]["role"], "user")
         return bool(matching)
 
     async def test_same_turn_and_rejected_turn_defer_until_later_admitted_reply(self):

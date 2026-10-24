@@ -244,6 +244,9 @@ class OfficialContextBridge:
         )
         if history is None or owner is None:
             return history
+        managed = getattr(owner, "_lcm_managed", None)
+        if callable(managed) and managed():
+            return history
         task = asyncio.current_task()
         self.pending.setdefault(owner, set()).add(task)
         try:
