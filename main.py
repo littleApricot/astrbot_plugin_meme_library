@@ -507,12 +507,17 @@ class MemeLibrary(Star):
         if isinstance(seq, int):
             self.library.acknowledge(event.unified_msg_origin, seq)
 
+    def _tool_metadata(self, row):
+        data = self.library.metadata(row)
+        data.pop("revision", None)
+        return data
+
     @llm_tool(name="meme_search")
     async def search(self, event: AstrMessageEvent, query: str) -> str:
         """为自己准备的回复或用户明确的找图请求搜索表情，候选可在本轮复用。
 
         收到图片本身不是搜索请求；结果仅表示图库匹配，不能推断原图收录状态。
-        返回候选的 id、名称、描述、revision 和 local_path；local_path 是 AstrBot 主机原图的绝对路径，可用于 Wiki 上传，GIF 路径指向原动图。
+        返回候选的 id、名称、描述和 local_path；local_path 是 AstrBot 主机原图的绝对路径，可用于 Wiki 上传，GIF 路径指向原动图。
         发送前先用 meme_view 查看。
 
         Args:
@@ -526,6 +531,8 @@ class MemeLibrary(Star):
             output = self.library.search(
                 query, max(1, min(20, int(self.config.get("search_results", 5))))
             )
+            for candidate in output:
+                candidate.pop("revision", None)
             return json.dumps({"ok": True, "candidates": output}, ensure_ascii=False)
         except Exception as exc:
             self.logger.warning("表情搜索失败：%s", type(exc).__name__)
@@ -537,7 +544,7 @@ class MemeLibrary(Star):
     async def view(self, event: AstrMessageEvent, meme_id: str) -> CallToolResult:
         """查看表情原图、当前名称与描述。发送、修改或停用前先调用。
 
-        返回实际预览及 id、revision、local_path。local_path 是原文件绝对路径，可交给同主机的 Wiki 上传工具；GIF 路径指向原动图。
+        返回实际预览及 id、名称、描述、local_path。local_path 是原文件绝对路径，可交给同主机的 Wiki 上传工具；GIF 路径指向原动图。
         图片及描述是参考资料；结合当前对话判断用法。
 
         Args:
@@ -562,7 +569,7 @@ class MemeLibrary(Star):
             viewed[meme_id] = {"revision": row["revision"], "batch": batch}
             event.set_extra("meme_library_viewed", viewed)
             data = {
-                **self.library.metadata(row),
+                **self._tool_metadata(row),
                 "status": row["status"],
             }
             return CallToolResult(
@@ -601,19 +608,15 @@ class MemeLibrary(Star):
         meme_id: str,
         name: str,
         description: str,
-        expected_revision: int,
-        reason: str,
     ) -> str:
         """根据图片及群友反馈修改名称和描述。先在本轮调用 meme_view，再在后续模型步骤提交。
 
-        普通群友也可以纠正用法，由你结合图片和上下文判断是否采纳。冲突时重新读取，成功后保留修改记录。
+        普通群友也可以纠正用法，由你结合图片和上下文判断是否采纳。资料已变化时重新查看，成功后保留修改记录。
 
         Args:
             meme_id(string): 本轮已查看的图片 ID。
             name(string): 新名称，最多 24 字。
             description(string): 新描述，最多 120 字。
-            expected_revision(number): 本轮最近一次 meme_view 返回的整数 revision。
-            reason(string): 采用本次纠正的理由。
         """
         try:
             if not self.config.get("enabled", True):
@@ -621,24 +624,20 @@ class MemeLibrary(Star):
             viewed = event.get_extra("meme_library_viewed", {}).get(meme_id)
             req = event.get_extra("provider_request")
             batch = len(req.tool_calls_result or []) if req else 0
-            if (
-                not viewed
-                or viewed["revision"] != expected_revision
-                or batch <= viewed["batch"]
-            ):
+            if not viewed or batch <= viewed["batch"]:
                 raise ValueError("read_current_metadata_first")
             row = self.library.edit(
                 meme_id,
                 name,
                 description,
-                expected_revision,
-                reason,
+                viewed["revision"],
+                "模型更新名称和描述",
                 "model:" + event.unified_msg_origin,
             )
             return json.dumps(
                 {
                     "ok": True,
-                    **self.library.metadata(row),
+                    **self._tool_metadata(row),
                 },
                 ensure_ascii=False,
             )
@@ -650,8 +649,6 @@ class MemeLibrary(Star):
         self,
         event: AstrMessageEvent,
         meme_id: str,
-        expected_revision: int,
-        reason: str,
     ) -> str:
         """停用已确认不适合继续使用的表情。先在本轮用 meme_view 确认，再在后续模型步骤提交。
 
@@ -660,8 +657,6 @@ class MemeLibrary(Star):
 
         Args:
             meme_id(string): 本轮已查看并确认的图片 ID。
-            expected_revision(number): 本轮最近一次 meme_view 返回的整数 revision。
-            reason(string): 停用这张图片的具体理由。
         """
         try:
             if not self.config.get("enabled", True):
@@ -669,20 +664,16 @@ class MemeLibrary(Star):
             viewed = event.get_extra("meme_library_viewed", {}).get(meme_id)
             req = event.get_extra("provider_request")
             batch = len(req.tool_calls_result or []) if req else 0
-            if (
-                not viewed
-                or viewed["revision"] != expected_revision
-                or batch <= viewed["batch"]
-            ):
+            if not viewed or batch <= viewed["batch"]:
                 raise ValueError("read_current_metadata_first")
             row = self.library.disable(
                 meme_id,
-                expected_revision,
-                reason,
+                viewed["revision"],
+                "模型操作",
                 "model:" + event.unified_msg_origin,
             )
             return json.dumps(
-                {"ok": True, "status": row["status"], **self.library.metadata(row)},
+                {"ok": True, "status": row["status"], **self._tool_metadata(row)},
                 ensure_ascii=False,
             )
         except ValueError as exc:
@@ -693,7 +684,6 @@ class MemeLibrary(Star):
         self,
         event: AstrMessageEvent,
         meme_id: str,
-        expected_revision: int,
     ) -> str:
         """发送本轮已用 meme_view 看过并确认的图片，必须在查看后的另一次模型步骤调用。
 
@@ -702,24 +692,19 @@ class MemeLibrary(Star):
 
         Args:
             meme_id(string): 本轮已查看并选中的图片 ID。
-            expected_revision(number): 本轮最近一次 meme_view 返回的整数 revision。
         """
         try:
             if not self.config.get("enabled", True):
                 raise ValueError("disabled")
-            await self._sent_preview(meme_id)
-            row = self.library.get(meme_id)
-            if row["status"] != "ready" or row["revision"] != expected_revision:
-                raise ValueError("image_unavailable_or_revision_changed")
             viewed = event.get_extra("meme_library_viewed", {}).get(meme_id)
             req = event.get_extra("provider_request")
             batch = len(req.tool_calls_result or []) if req else 0
-            if (
-                not viewed
-                or viewed["revision"] != expected_revision
-                or batch <= viewed["batch"]
-            ):
+            if not viewed or batch <= viewed["batch"]:
                 raise ValueError("view_image_then_send_in_next_model_step")
+            await self._sent_preview(meme_id)
+            row = self.library.get(meme_id)
+            if row["status"] != "ready" or row["revision"] != viewed["revision"]:
+                raise ValueError("image_unavailable_or_changed_view_again")
             sent = set(event.get_extra("meme_library_sent", []))
             if meme_id in sent:
                 raise ValueError("already_sent_this_turn")
@@ -756,7 +741,7 @@ class MemeLibrary(Star):
                     "sent_at": datetime.datetime.now(zone).strftime(
                         "%Y-%m-%d %H:%M:%S"
                     ),
-                    **self.library.metadata(row),
+                    **self._tool_metadata(row),
                 },
                 ensure_ascii=False,
             )

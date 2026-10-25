@@ -293,7 +293,7 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
                 return LLMResponse(
                     role="assistant",
                     tools_call_name=["meme_send"],
-                    tools_call_args=[{"meme_id": row["id"], "expected_revision": 1}],
+                    tools_call_args=[{"meme_id": row["id"]}],
                     tools_call_ids=["send-1"],
                 )
             return LLMResponse(role="assistant", completion_text="接着聊")
@@ -493,7 +493,7 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.view(incoming, row["id"])
         request.tool_calls_result = [SimpleNamespace()]
         incoming.send.side_effect = RuntimeError("simulated send failure")
-        result = json.loads(await self.plugin.send(incoming, row["id"], 1))
+        result = json.loads(await self.plugin.send(incoming, row["id"]))
         self.assertFalse(result["sent"])
         self.assertEqual(self.plugin.library.get(row["id"])["use_count"], 0)
         second = fixtures.event("group-b")
@@ -506,7 +506,7 @@ class RecommendationFlowTests(unittest.IsolatedAsyncioTestCase):
             "record_use",
             side_effect=sqlite3.OperationalError("test-only"),
         ):
-            result = json.loads(await self.plugin.send(second, row["id"], 1))
+            result = json.loads(await self.plugin.send(second, row["id"]))
         self.assertTrue(result["sent"])
         second.send.assert_awaited_once()
 

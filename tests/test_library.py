@@ -214,6 +214,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             register_web_api=MagicMock(),
             get_using_provider_async=AsyncMock(return_value=self.provider),
             get_provider_by_id=MagicMock(return_value=self.provider),
+            get_config=lambda **kwargs: {"timezone": "Asia/Shanghai"},
         )
         self.patch = patch(
             "astrbot_plugin_meme_library.main.StarTools.get_data_dir",
@@ -402,10 +403,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         e = event()
         req = ProviderRequest()
         e.set_extra("provider_request", req)
-        denied = json.loads(await self.plugin.send(e, row["id"], 1))
+        denied = json.loads(await self.plugin.send(e, row["id"]))
         self.assertFalse(denied["sent"])
         await self.plugin.view(e, row["id"])
-        denied = json.loads(await self.plugin.send(e, row["id"], 1))
+        denied = json.loads(await self.plugin.send(e, row["id"]))
         self.assertFalse(denied["sent"])
         req.tool_calls_result = [SimpleNamespace()]
 
@@ -414,10 +415,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         e.send.side_effect = slow_send
         results = await asyncio.gather(
-            self.plugin.send(e, row["id"], 1),
-            self.plugin.send(e, row["id"], 1),
+            self.plugin.send(e, row["id"]),
+            self.plugin.send(e, row["id"]),
         )
-        self.assertEqual(sum(json.loads(r)["sent"] for r in results), 1)
+        self.assertEqual(sum(json.loads(r)["sent"] for r in results), 1, results)
         self.assertEqual(e.send.await_count, 1)
 
     async def test_ordinary_member_can_correct_same_document_and_stale_selection_fails(
@@ -430,15 +431,18 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.view(e, row["id"])
         req.tool_calls_result = [SimpleNamespace()]
         result = json.loads(
-            await self.plugin.edit(
-                e, row["id"], "夸人厉害", "这张在群里是夸人厉害", 1, "普通群友明确纠正"
-            )
+            await self.plugin.edit(e, row["id"], "夸人厉害", "这张在群里是夸人厉害")
         )
         self.assertTrue(result["ok"])
+        self.assertNotIn("revision", result)
+        self.assertEqual(
+            set(llm_tools.get_func("meme_edit").parameters["properties"]),
+            {"meme_id", "name", "description"},
+        )
         self.assertEqual(
             self.plugin.library.get(row["id"])["description"], result["description"]
         )
-        stale = json.loads(await self.plugin.send(e, row["id"], 1))
+        stale = json.loads(await self.plugin.send(e, row["id"]))
         self.assertFalse(stale["sent"])
         e.send.assert_not_awaited()
 
@@ -481,7 +485,6 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                     tools_call_args=[
                         {
                             "meme_id": row["id"],
-                            "expected_revision": 1,
                         }
                     ],
                     tools_call_ids=["send-1"],
@@ -502,7 +505,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             tool.handler = handler
             registered_tools.append(tool)
         send_parameters = registered_tools[1].parameters["properties"]
-        self.assertEqual(set(send_parameters), {"meme_id", "expected_revision"})
+        self.assertEqual(set(send_parameters), {"meme_id"})
         req = ProviderRequest(
             prompt="庆祝一下",
             func_tool=ToolSet(registered_tools),
@@ -598,7 +601,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             row["id"], "夸人厉害", "实际上表示夸人厉害", 1, "纠正", "model"
         )
         result = json.loads(await self.plugin.search(event("group-b"), "夸人 厉害"))
-        self.assertEqual(result["candidates"][0]["revision"], 2)
+        self.assertNotIn("revision", result["candidates"][0])
         self.assertEqual(result["candidates"][0]["name"], "夸人厉害")
         self.assertNotIn("document", result["candidates"][0])
         path = Path(result["candidates"][0]["local_path"])

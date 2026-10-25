@@ -129,7 +129,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
             LLMResponse(
                 role="assistant",
                 tools_call_name=["meme_send"],
-                tools_call_args=[{"meme_id": chosen["id"], "expected_revision": 1}],
+                tools_call_args=[{"meme_id": chosen["id"]}],
                 tools_call_ids=["sent-image"],
             ),
             LLMResponse(
@@ -307,9 +307,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                         return LLMResponse(
                             role="assistant",
                             tools_call_name=["meme_send"],
-                            tools_call_args=[
-                                {"meme_id": row["id"], "expected_revision": 1}
-                            ],
+                            tools_call_args=[{"meme_id": row["id"]}],
                             tools_call_ids=[label + "-send"],
                         )
                     if pause:

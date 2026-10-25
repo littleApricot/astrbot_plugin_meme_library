@@ -51,8 +51,6 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
                     tools_call_args=[
                         {
                             "meme_id": row["id"],
-                            "expected_revision": 1,
-                            "reason": "群友提醒这张误收录，核对图片后采纳",
                         }
                     ],
                     tools_call_ids=["disable-1"],
@@ -78,7 +76,7 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
             tools.append(tool)
         self.assertEqual(
             set(tools[-1].parameters["properties"]),
-            {"meme_id", "expected_revision", "reason"},
+            {"meme_id"},
         )
         req = ProviderRequest(
             prompt="这张误收录了，删掉它",
@@ -119,7 +117,8 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
             if m.get("role") == "tool" and m.get("tool_call_id") == "disable-1"
         ]
         self.assertEqual(len(disabled), 1)
-        self.assertEqual(json.loads(disabled[0]["content"])["revision"], 2)
+        self.assertNotIn("revision", json.loads(disabled[0]["content"]))
+        self.assertEqual(self.plugin.library.get(row["id"])["revision"], 2)
         self.assertEqual(saved[-1]["role"], "assistant")
 
     async def test_disable_requires_current_view_in_an_earlier_model_step(self):
@@ -130,14 +129,12 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         for viewed in (False, True):
             if viewed:
                 await self.plugin.view(incoming, row["id"])
-            result = json.loads(
-                await self.plugin.disable(incoming, row["id"], 1, "误收")
-            )
+            result = json.loads(await self.plugin.disable(incoming, row["id"]))
             self.assertEqual(result["error"], "read_current_metadata_first")
             self.assertEqual(self.plugin.library.get(row["id"])["status"], "ready")
         req.tool_calls_result = [SimpleNamespace()]
         self.assertTrue(
-            json.loads(await self.plugin.disable(incoming, row["id"], 1, "误收"))["ok"]
+            json.loads(await self.plugin.disable(incoming, row["id"]))["ok"]
         )
 
     async def test_stale_view_cannot_disable_a_newer_correction(self):
@@ -150,11 +147,18 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.library.edit(
             row["id"], "新名称", "已核对修正用途", 1, "纠正", "dashboard"
         )
-        result = json.loads(await self.plugin.disable(incoming, row["id"], 1, "旧判断"))
+        result = json.loads(await self.plugin.disable(incoming, row["id"]))
         self.assertEqual(result["error"], "revision_conflict")
         current = self.plugin.library.get(row["id"])
         self.assertEqual(current["status"], "ready")
         self.assertEqual(current["description"], "已核对修正用途")
+        viewed = await self.plugin.view(incoming, row["id"])
+        metadata = json.loads(viewed.content[0].text)
+        self.assertNotIn("revision", metadata)
+        req.tool_calls_result.append(SimpleNamespace())
+        refreshed = json.loads(await self.plugin.disable(incoming, row["id"]))
+        self.assertTrue(refreshed["ok"])
+        self.assertNotIn("revision", refreshed)
 
     async def test_retirement_persists_excludes_all_groups_and_preserves_original(self):
         row = self.ready()
@@ -165,9 +169,7 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.view(incoming, row["id"])
         req.tool_calls_result = [SimpleNamespace()]
         self.plugin.library.acknowledge(incoming.unified_msg_origin, seq)
-        result = json.loads(
-            await self.plugin.disable(incoming, row["id"], 1, "普通群友纠正")
-        )
+        result = json.loads(await self.plugin.disable(incoming, row["id"]))
         self.assertTrue(result["ok"])
         current = self.plugin.library.get(row["id"])
         self.assertEqual(current["revision"], 2)
@@ -179,14 +181,14 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.library.latest_seq(), seq)
         self.assertEqual(self.plugin.library.unseen(incoming.unified_msg_origin), 0)
         audit = self.plugin.library.revisions(row["id"])[0]
-        self.assertEqual(audit["reason"], "停用：普通群友纠正")
+        self.assertEqual(audit["reason"], "停用：模型操作")
         self.assertEqual(audit["actor"], "model:" + incoming.unified_msg_origin)
         again, added = self.plugin.library.add(
             fixtures.image_bytes(), ".png", "group-b", "", ""
         )
         self.assertFalse(added)
         self.assertEqual(again["status"], "disabled")
-        stale = json.loads(await self.plugin.send(incoming, row["id"], 1))
+        stale = json.loads(await self.plugin.send(incoming, row["id"]))
         self.assertFalse(stale["sent"])
         for group in ("group-a", "group-b"):
             found = json.loads(await self.plugin.search(fixtures.event(group), "开心"))
@@ -205,7 +207,7 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.view(incoming, row["id"])
         req.tool_calls_result = [SimpleNamespace()]
 
-        disabled = json.loads(await self.plugin.disable(incoming, row["id"], 1, "误收"))
+        disabled = json.loads(await self.plugin.disable(incoming, row["id"]))
         self.assertTrue(disabled["ok"])
         result = json.loads(await self.plugin.search(fixtures.event("group-b"), "开心"))
         self.assertEqual(result["candidates"], [])
@@ -218,32 +220,19 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         incoming.set_extra("provider_request", req)
         await self.plugin.view(incoming, row["id"])
         req.tool_calls_result = [SimpleNamespace()]
-        for revision, reason, error in (
-            (1, "   ", "reason_required"),
-            (True, "误收", "invalid_revision"),
-            (1.0, "误收", "invalid_revision"),
-        ):
-            with self.subTest(revision=revision, reason=reason):
-                result = json.loads(
-                    await self.plugin.disable(incoming, row["id"], revision, reason)
-                )
-                self.assertEqual(result["error"], error)
-                self.assertEqual(self.plugin.library.get(row["id"]), row)
         self.plugin.config["enabled"] = False
-        result = json.loads(await self.plugin.disable(incoming, row["id"], 1, "误收"))
+        result = json.loads(await self.plugin.disable(incoming, row["id"]))
         self.assertEqual(result["error"], "disabled")
         self.plugin.config["enabled"] = True
-        await self.plugin.disable(incoming, row["id"], 1, "误收")
+        await self.plugin.disable(incoming, row["id"])
         await self.plugin.view(incoming, row["id"])
         req.tool_calls_result.append(SimpleNamespace())
-        repeat = json.loads(await self.plugin.disable(incoming, row["id"], 2, "已停用"))
+        repeat = json.loads(await self.plugin.disable(incoming, row["id"]))
         self.assertTrue(repeat["ok"])
         self.assertEqual(len(self.plugin.library.revisions(row["id"])), 2)
         missing = await self.plugin.view(incoming, "not-an-image")
         self.assertTrue(missing.isError)
-        result = json.loads(
-            await self.plugin.disable(incoming, "not-an-image", 1, "误收")
-        )
+        result = json.loads(await self.plugin.disable(incoming, "not-an-image"))
         self.assertFalse(result["ok"])
 
     async def test_dashboard_can_reenable_a_model_disabled_image(self):
@@ -253,7 +242,7 @@ class DisableTests(unittest.IsolatedAsyncioTestCase):
         incoming.set_extra("provider_request", req)
         await self.plugin.view(incoming, row["id"])
         req.tool_calls_result = [SimpleNamespace()]
-        await self.plugin.disable(incoming, row["id"], 1, "误收")
+        await self.plugin.disable(incoming, row["id"])
         status, result = await api_fixtures.ApiTests.call_api(
             self, "action", {"id": row["id"], "action": "enable"}
         )
