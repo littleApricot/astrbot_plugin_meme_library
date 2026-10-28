@@ -10,6 +10,10 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 
+class ImageFiltered(ValueError):
+    """An image skipped by collection policy, not a download failure."""
+
+
 def parse_json(text: str) -> dict:
     """Read a JSON object, allowing only an enclosing Markdown code fence.
 
@@ -31,22 +35,40 @@ def parse_json(text: str) -> dict:
     return value
 
 
-def inspect_image(data: bytes, maximum: int) -> str:
+def inspect_image(
+    data: bytes,
+    maximum: int,
+    *,
+    max_long_edge: int | None = None,
+    max_aspect_ratio: float | None = None,
+) -> str:
     """Validate size and image format before keeping the original bytes.
 
     Args:
         data: Original image bytes.
         maximum: Maximum allowed file size in bytes.
+        max_long_edge: Collection limit in pixels; equality is allowed.
+        max_aspect_ratio: Long edge divided by short edge; equality is allowed.
 
     Returns:
         A safe extension determined by decoding the file.
 
     Raises:
+        ImageFiltered: Original dimensions exceed a collection limit.
         ValueError: The image is oversized or has an unsupported format.
     """
     if len(data) > maximum:
         raise ValueError("image_too_large")
     with Image.open(io.BytesIO(data)) as image:
+        long_edge, short_edge = max(image.size), min(image.size)
+        if max_long_edge is not None and long_edge > max_long_edge:
+            raise ImageFiltered(
+                f"原图 {image.width}×{image.height}，长边超过 {max_long_edge} 像素"
+            )
+        if max_aspect_ratio is not None and long_edge > short_edge * max_aspect_ratio:
+            raise ImageFiltered(
+                f"原图 {image.width}×{image.height}，长短边比例超过 {max_aspect_ratio:g}:1"
+            )
         if image.width * image.height > 40_000_000:
             raise ValueError("image_dimensions_too_large")
         suffix = {"JPEG": ".jpg", "PNG": ".png", "GIF": ".gif", "WEBP": ".webp"}.get(

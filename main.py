@@ -33,7 +33,7 @@ from .history import (
     tool_results,
 )
 from .store import Library
-from .vision import inspect_image, parse_json, previews
+from .vision import ImageFiltered, inspect_image, parse_json, previews
 
 COLLECTION_NOTICE = "已收录之前聊天里发现的新表情包。"
 RECOMMENDATION_HEADER = "本轮可选表情推荐"
@@ -181,6 +181,14 @@ class MemeLibrary(Star):
             raise ValueError("model_not_configured")
         return provider
 
+    def _inspect_collection_image(self, data: bytes) -> str:
+        return inspect_image(
+            data,
+            max(1, int(self.config.get("max_image_mb", 15))) * 1024 * 1024,
+            max_long_edge=max(1, int(self.config.get("max_image_long_edge", 1200))),
+            max_aspect_ratio=max(1.0, float(self.config.get("max_image_aspect_ratio", 3))),
+        )
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=20_000)
     async def collect(self, event: AstrMessageEvent):
         """Snapshot incoming group images before reply admission and cleanup.
@@ -210,7 +218,7 @@ class MemeLibrary(Star):
                 if source.stat().st_size > maximum:
                     raise ValueError("image_too_large")
                 data = await asyncio.to_thread(source.read_bytes)
-                suffix = await asyncio.to_thread(inspect_image, data, maximum)
+                suffix = await asyncio.to_thread(self._inspect_collection_image, data)
                 record, added = self.library.add(
                     data,
                     suffix,
@@ -233,6 +241,8 @@ class MemeLibrary(Star):
                 if added:
                     self.logger.info("表情包已加入收录队列：%s", record["id"])
                     self._start_worker()
+            except ImageFiltered as exc:
+                self.logger.info("图片已跳过收录：%s", exc)
             except Exception as exc:
                 self.library.download_error(
                     str(part.url or part.file or ""),
@@ -308,7 +318,9 @@ class MemeLibrary(Star):
                         if source.stat().st_size > maximum:
                             raise ValueError("image_too_large")
                         data = await asyncio.to_thread(source.read_bytes)
-                        suffix = await asyncio.to_thread(inspect_image, data, maximum)
+                        suffix = await asyncio.to_thread(
+                            self._inspect_collection_image, data
+                        )
                         self.library.add(
                             data,
                             suffix,
@@ -318,6 +330,8 @@ class MemeLibrary(Star):
                         )
                         self.library.set_status(record["id"], "retried")
                         continue
+                    data = await asyncio.to_thread(self.library.path(record).read_bytes)
+                    await asyncio.to_thread(self._inspect_collection_image, data)
                     frames = await asyncio.to_thread(
                         previews, self.library.path(record)
                     )
@@ -363,6 +377,9 @@ class MemeLibrary(Star):
                         record["id"],
                         self.library.get(record["id"])["status"],
                     )
+                except ImageFiltered as exc:
+                    self.library.set_status(record["id"], "rejected", str(exc))
+                    self.logger.info("图片已跳过收录：%s，%s", record["id"], exc)
                 except asyncio.CancelledError:
                     self.library.set_status(record["id"], "queued")
                     raise
