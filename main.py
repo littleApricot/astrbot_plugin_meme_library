@@ -102,6 +102,7 @@ class MemeLibrary(Star):
     def lcm_context_rules(self):
         return {
             "owner": "astrbot_plugin_meme_library",
+            "system": "本轮临时提示中的表情推荐：" + RECOMMENDATION_NOTE,
             "temporary": self._temporary_context,
             "history_tools": {
                 "meme_search": "turn",
@@ -149,8 +150,6 @@ class MemeLibrary(Star):
                 pieces.append(
                     RECOMMENDATION_HEADER
                     + "：\n"
-                    + RECOMMENDATION_NOTE
-                    + "\n"
                     + json.dumps(
                         [
                             {key: row[key] for key in ("id", "name", "description")}
