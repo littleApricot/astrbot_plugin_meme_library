@@ -102,6 +102,18 @@ class MemeLibrary(Star):
     def lcm_context_rules(self):
         return {
             "owner": "astrbot_plugin_meme_library",
+            "prompt_blocks": [
+                {
+                    "key": "guidance",
+                    "kind": "tool_guidance",
+                    "content": "本轮临时提示中的表情推荐：" + RECOMMENDATION_NOTE,
+                },
+                {
+                    "key": "candidates",
+                    "kind": "meme_candidates",
+                    "content": self._temporary_context,
+                },
+            ],
             "system": "本轮临时提示中的表情推荐：" + RECOMMENDATION_NOTE,
             "temporary": self._temporary_context,
             "history_tools": {
